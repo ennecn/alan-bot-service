@@ -1,0 +1,11 @@
+{
+  "name": "cc-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claude Code Bridge - HTTP service for persistent Claude Code sessions",
+  "main": "cc-bridge.js",
+  "scripts": {
+    "start": "node cc-bridge.js",
+    "dev": "node --watch cc-bridge.js"
+  }
+}

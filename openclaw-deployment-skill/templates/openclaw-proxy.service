@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenClaw API Proxy Service
+After=docker.service openclaw.service
+Requires=docker.service
+PartOf=openclaw.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+ExecStartPre=/bin/bash -c 'docker cp /root/api-proxy.js openclaw-openclaw-gateway-1:/tmp/api-proxy.js'
+ExecStart=/usr/bin/docker exec openclaw-openclaw-gateway-1 node /tmp/api-proxy.js
+ExecStop=/usr/bin/docker exec openclaw-openclaw-gateway-1 pkill -TERM -f 'node /tmp/api-proxy.js'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openclaw-proxy
+
+[Install]
+WantedBy=multi-user.target

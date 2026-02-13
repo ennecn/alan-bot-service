@@ -1,0 +1,26 @@
+services:
+  openclaw-gateway:
+    image: openclaw:local
+    network_mode: host
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: mysecrettoken123
+      ANTHROPIC_BASE_URL: http://127.0.0.1:8022
+      ANTHROPIC_API_KEY: sk-RHLExha223hVLBoHxuiXK1d9ynqtvSTOX3CRlP7RupW5eERW
+      TAVILY_API_KEY: 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
+      DISPLAY: :99
+    volumes:
+      - ./config:/home/node/.openclaw
+      - ./workspace:/home/node/.openclaw/workspace
+    init: true
+    restart: unless-stopped
+    command:
+      - node
+      - dist/index.js
+      - gateway
+      - --bind
+      - lan
+      - --port
+      - '18789'
+      - --allow-unconfigured

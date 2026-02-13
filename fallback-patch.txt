@@ -1,0 +1,12 @@
+
+  // 3.5. Check fallback chain - override model if tier is exhausted
+  const originalModel = model;
+  const activeTier = getActiveTier(model);
+  if (activeTier) {
+    if (activeTier.model !== originalModel) {
+      console.log(`[Fallback] Model fallback: ${originalModel} -> ${activeTier.model} (tier ${activeTier.tier}, provider: ${activeTier.provider})`);
+      model = activeTier.model;
+    }
+  } else {
+    console.warn('[Fallback] WARNING: All tiers exhausted!');
+  }

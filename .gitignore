@@ -1,0 +1,41 @@
+# === Dependencies ===
+node_modules/
+__pycache__/
+
+# === Build artifacts ===
+.next/
+tsconfig.tsbuildinfo
+
+# === Binary archives (too large for git) ===
+*.tar
+*.tar.gz
+*.zip
+*.b64
+
+# === Databases ===
+*.db
+*.sqlite
+
+# === Sensitive data ===
+accounts.json
+accounts_extracted/
+
+# === Nested git repos ===
+openclaw_repo/
+web-im/
+
+# === Bot soul backups (large, binary-ish) ===
+aling_soul/
+
+# === Session transcripts (large, date-prefixed) ===
+2026-*.txt
+
+# === Session transcripts (large, ephemeral) ===
+*.jsonl
+
+# === Windows artifacts ===
+nul
+
+# === Skill zips (generated) ===
+openclaw-deployment-skill.zip
+openclaw-tool-prefix-patch.zip

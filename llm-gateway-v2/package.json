@@ -1,0 +1,14 @@
+{
+  "name": "llm-gateway-v2",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Lightweight LLM routing gateway with Web UI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}

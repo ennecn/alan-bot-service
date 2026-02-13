@@ -1,0 +1,17 @@
+{
+  "telegram": {
+    "botToken": "8568137940:AAEIdl6OlnicBkbclWwziD5RU29t1rFf_iU",
+    "chatId": "6564284621"
+  },
+  "modelOptions": [
+    { "id": "antigravity/gemini-3-flash", "label": "Gemini 3 Flash (Antigravity)" },
+    { "id": "codesome/claude-opus-4-6", "label": "Claude Opus 4.6 (Codesome)" },
+    { "id": "t8star/claude-opus-4-6", "label": "Claude Opus 4.6 (T8star)" }
+  ],
+  "bots": {
+    "alin": { "name": "Alin", "container": "deploy-openclaw-gateway-1" },
+    "lain": { "name": "Lain", "container": "lain-gateway" },
+    "lumi": { "name": "Lumi", "container": "lumi-gateway" },
+    "aling": { "name": "Aling", "container": "aling-gateway" }
+  }
+}

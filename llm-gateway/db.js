@@ -1,0 +1,422 @@
+import Database from 'better-sqlite3';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const dataDir = join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const db = new Database(join(dataDir, 'gateway.db'));
+db.pragma('journal_mode = WAL');
+
+// Initialize tables
+db.exec(`
+  CREATE TABLE IF NOT EXISTS providers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    api_keys TEXT NOT NULL DEFAULT '[]',
+    route_type TEXT DEFAULT 'direct',
+    supported_models TEXT DEFAULT '[]',
+    model_mapping TEXT DEFAULT '{}',
+    priority INTEGER DEFAULT 100,
+    enabled INTEGER DEFAULT 1,
+    health_status TEXT DEFAULT 'unknown',
+    last_check_at INTEGER,
+    error_count INTEGER DEFAULT 0,
+    exhausted_until INTEGER,
+    recovery_minutes INTEGER DEFAULT 5,
+    current_key_index INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS request_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+    provider_id INTEGER,
+    provider_name TEXT,
+    model TEXT,
+    status_code INTEGER,
+    latency_ms INTEGER,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    error_type TEXT,
+    error_message TEXT,
+    cascaded_from TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(provider_id);
+
+  CREATE TABLE IF NOT EXISTS clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    api_key TEXT UNIQUE NOT NULL,
+    default_model TEXT,
+    provider_order TEXT DEFAULT '[]',
+    model_mapping TEXT DEFAULT '{}',
+    enabled INTEGER DEFAULT 1,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_clients_api_key ON clients(api_key);
+`);
+
+// Migration: add client_id and client_name to request_logs if missing
+try {
+  db.prepare('SELECT client_id FROM request_logs LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE request_logs ADD COLUMN client_id INTEGER');
+  db.exec('ALTER TABLE request_logs ADD COLUMN client_name TEXT');
+}
+
+// Migration: add api_format to providers if missing (default: 'anthropic')
+try {
+  db.prepare('SELECT api_format FROM providers LIMIT 1').get();
+} catch {
+  db.exec("ALTER TABLE providers ADD COLUMN api_format TEXT DEFAULT 'anthropic'");
+}
+
+// Provider operations
+export function getAllProviders() {
+  return db.prepare('SELECT * FROM providers ORDER BY priority ASC').all();
+}
+
+export function getEnabledProviders() {
+  return db.prepare('SELECT * FROM providers WHERE enabled = 1 ORDER BY priority ASC').all();
+}
+
+export function getProviderById(id) {
+  return db.prepare('SELECT * FROM providers WHERE id = ?').get(id);
+}
+
+export function createProvider(provider) {
+  const stmt = db.prepare(`
+    INSERT INTO providers (name, base_url, api_keys, route_type, supported_models, model_mapping, priority, enabled, recovery_minutes, api_format)
+    VALUES (@name, @base_url, @api_keys, @route_type, @supported_models, @model_mapping, @priority, @enabled, @recovery_minutes, @api_format)
+  `);
+  const result = stmt.run({
+    name: provider.name,
+    base_url: provider.base_url,
+    api_keys: JSON.stringify(provider.api_keys || []),
+    route_type: provider.route_type || 'direct',
+    supported_models: JSON.stringify(provider.supported_models || []),
+    model_mapping: JSON.stringify(provider.model_mapping || {}),
+    priority: provider.priority || 100,
+    enabled: provider.enabled !== false ? 1 : 0,
+    recovery_minutes: provider.recovery_minutes || 5,
+    api_format: provider.api_format || 'anthropic'
+  });
+  return getProviderById(result.lastInsertRowid);
+}
+
+export function updateProvider(id, updates) {
+  const provider = getProviderById(id);
+  if (!provider) return null;
+
+  const fields = [];
+  const params = { id };
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (['name', 'base_url', 'route_type', 'priority', 'enabled', 'recovery_minutes', 'health_status', 'error_count', 'exhausted_until', 'current_key_index', 'last_check_at', 'api_format'].includes(key)) {
+      fields.push(`${key} = @${key}`);
+      params[key] = value;
+    } else if (['api_keys', 'supported_models', 'model_mapping'].includes(key)) {
+      fields.push(`${key} = @${key}`);
+      params[key] = JSON.stringify(value);
+    }
+  }
+
+  if (fields.length === 0) return provider;
+
+  fields.push('updated_at = strftime(\'%s\', \'now\')');
+  const stmt = db.prepare(`UPDATE providers SET ${fields.join(', ')} WHERE id = @id`);
+  stmt.run(params);
+  return getProviderById(id);
+}
+
+export function deleteProvider(id) {
+  const stmt = db.prepare('DELETE FROM providers WHERE id = ?');
+  return stmt.run(id).changes > 0;
+}
+
+export function markProviderExhausted(id) {
+  const provider = getProviderById(id);
+  if (!provider) return;
+
+  const recoveryMinutes = provider.recovery_minutes || 5;
+  const exhaustedUntil = Math.floor(Date.now() / 1000) + (recoveryMinutes * 60);
+
+  const stmt = db.prepare('UPDATE providers SET exhausted_until = ?, health_status = ?, updated_at = strftime(\'%s\', \'now\') WHERE id = ?');
+  stmt.run(exhaustedUntil, 'exhausted', id);
+}
+
+export function incrementErrorCount(id) {
+  const stmt = db.prepare('UPDATE providers SET error_count = error_count + 1, updated_at = strftime(\'%s\', \'now\') WHERE id = ?');
+  stmt.run(id);
+
+  const provider = getProviderById(id);
+  if (provider && provider.error_count >= 3) {
+    const unhealthyStmt = db.prepare('UPDATE providers SET health_status = ? WHERE id = ?');
+    unhealthyStmt.run('unhealthy', id);
+  }
+}
+
+export function resetProviderHealth(id) {
+  const stmt = db.prepare('UPDATE providers SET error_count = 0, health_status = ?, exhausted_until = NULL, updated_at = strftime(\'%s\', \'now\') WHERE id = ?');
+  stmt.run('healthy', id);
+}
+
+export function rotateApiKey(id) {
+  const provider = getProviderById(id);
+  if (!provider) return;
+
+  const keys = JSON.parse(provider.api_keys || '[]');
+  if (keys.length <= 1) return;
+
+  const nextIndex = (provider.current_key_index + 1) % keys.length;
+  const stmt = db.prepare('UPDATE providers SET current_key_index = ? WHERE id = ?');
+  stmt.run(nextIndex, id);
+}
+
+// Settings operations
+export function getSetting(key) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : null;
+}
+
+export function setSetting(key, value) {
+  const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  stmt.run(key, value);
+}
+
+export function getAllSettings() {
+  const rows = db.prepare('SELECT * FROM settings').all();
+  const settings = {};
+  for (const row of rows) {
+    settings[row.key] = row.value;
+  }
+  return settings;
+}
+
+// Logging operations
+export function logRequest(log) {
+  const stmt = db.prepare(`
+    INSERT INTO request_logs (provider_id, provider_name, model, status_code, latency_ms, tokens_in, tokens_out, error_type, error_message, cascaded_from, client_id, client_name)
+    VALUES (@provider_id, @provider_name, @model, @status_code, @latency_ms, @tokens_in, @tokens_out, @error_type, @error_message, @cascaded_from, @client_id, @client_name)
+  `);
+  stmt.run({
+    provider_id: log.provider_id || null,
+    provider_name: log.provider_name || null,
+    model: log.model || null,
+    status_code: log.status_code || null,
+    latency_ms: log.latency_ms || null,
+    tokens_in: log.tokens_in || null,
+    tokens_out: log.tokens_out || null,
+    error_type: log.error_type || null,
+    error_message: log.error_message || null,
+    cascaded_from: log.cascaded_from || null,
+    client_id: log.client_id || null,
+    client_name: log.client_name || null
+  });
+}
+
+export function getRecentLogs(limit = 100, offset = 0) {
+  return db.prepare('SELECT * FROM request_logs ORDER BY timestamp DESC LIMIT ? OFFSET ?').all(limit, offset);
+}
+
+export function getLogStats(sinceTimestamp) {
+  const since = sinceTimestamp || Math.floor(Date.now() / 1000) - 86400; // Default: last 24h
+
+  const total = db.prepare('SELECT COUNT(*) as count FROM request_logs WHERE timestamp >= ?').get(since);
+  const byProvider = db.prepare(`
+    SELECT provider_name, COUNT(*) as count,
+           SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as success_count
+    FROM request_logs
+    WHERE timestamp >= ?
+    GROUP BY provider_name
+  `).all(since);
+  const byStatus = db.prepare(`
+    SELECT status_code, COUNT(*) as count
+    FROM request_logs
+    WHERE timestamp >= ?
+    GROUP BY status_code
+  `).all(since);
+  const avgLatency = db.prepare('SELECT AVG(latency_ms) as avg FROM request_logs WHERE timestamp >= ? AND latency_ms IS NOT NULL').get(since);
+
+  return {
+    total: total.count,
+    by_provider: byProvider,
+    by_status: byStatus,
+    avg_latency_ms: Math.round(avgLatency.avg || 0)
+  };
+}
+
+export function cleanOldLogs(daysToKeep = 7) {
+  const cutoff = Math.floor(Date.now() / 1000) - (daysToKeep * 86400);
+  const stmt = db.prepare('DELETE FROM request_logs WHERE timestamp < ?');
+  return stmt.run(cutoff).changes;
+}
+
+// Client operations
+function generateApiKey(prefix = 'gw') {
+  return `${prefix}-${crypto.randomBytes(16).toString('hex')}`;
+}
+
+export function getAllClients() {
+  return db.prepare('SELECT * FROM clients ORDER BY created_at ASC').all();
+}
+
+export function getClientById(id) {
+  return db.prepare('SELECT * FROM clients WHERE id = ?').get(id);
+}
+
+export function getClientByApiKey(apiKey) {
+  return db.prepare('SELECT * FROM clients WHERE api_key = ? AND enabled = 1').get(apiKey);
+}
+
+export function createClient(client) {
+  const apiKey = client.api_key || generateApiKey(client.name ? `gw-${client.name.toLowerCase().replace(/[^a-z0-9]/g, '')}` : 'gw');
+  const stmt = db.prepare(`
+    INSERT INTO clients (name, api_key, default_model, provider_order, model_mapping, enabled)
+    VALUES (@name, @api_key, @default_model, @provider_order, @model_mapping, @enabled)
+  `);
+  const result = stmt.run({
+    name: client.name,
+    api_key: apiKey,
+    default_model: client.default_model || null,
+    provider_order: JSON.stringify(client.provider_order || []),
+    model_mapping: JSON.stringify(client.model_mapping || {}),
+    enabled: client.enabled !== false ? 1 : 0
+  });
+  return getClientById(result.lastInsertRowid);
+}
+
+export function updateClient(id, updates) {
+  const client = getClientById(id);
+  if (!client) return null;
+
+  const fields = [];
+  const params = { id };
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (['name', 'default_model', 'enabled'].includes(key)) {
+      fields.push(`${key} = @${key}`);
+      params[key] = value;
+    } else if (['provider_order', 'model_mapping'].includes(key)) {
+      fields.push(`${key} = @${key}`);
+      params[key] = JSON.stringify(value);
+    }
+  }
+
+  if (fields.length === 0) return client;
+
+  fields.push('updated_at = strftime(\'%s\', \'now\')');
+  const stmt = db.prepare(`UPDATE clients SET ${fields.join(', ')} WHERE id = @id`);
+  stmt.run(params);
+  return getClientById(id);
+}
+
+export function deleteClient(id) {
+  const stmt = db.prepare('DELETE FROM clients WHERE id = ?');
+  return stmt.run(id).changes > 0;
+}
+
+export function regenerateClientKey(id) {
+  const client = getClientById(id);
+  if (!client) return null;
+
+  const prefix = `gw-${client.name.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+  const newKey = generateApiKey(prefix);
+  db.prepare('UPDATE clients SET api_key = ?, updated_at = strftime(\'%s\', \'now\') WHERE id = ?').run(newKey, id);
+  return getClientById(id);
+}
+
+// Initialize default settings
+export function initializeDefaults() {
+  if (!getSetting('telegram_bot_token')) {
+    setSetting('telegram_bot_token', '8568137940:AAEIdl6OlnicBkbclWwziD5RU29t1rFf_iU');
+  }
+  if (!getSetting('telegram_chat_id')) {
+    setSetting('telegram_chat_id', '6564284621');
+  }
+  if (!getSetting('proxy_url')) {
+    setSetting('proxy_url', 'socks5://14a340061d444:8cc533ae8b@161.77.202.30:12324');
+  }
+  if (!getSetting('notification_cooldown_minutes')) {
+    setSetting('notification_cooldown_minutes', '5');
+  }
+  if (!getSetting('allowed_models')) {
+    setSetting('allowed_models', JSON.stringify([
+      'claude-opus-4-5-thinking',
+      'claude-sonnet-4-5-thinking',
+      'claude-opus-4-6-thinking',
+      'claude-sonnet-4-5-20250929',
+      'claude-3-5-sonnet-20241022'
+    ]));
+  }
+}
+
+// Initialize default providers
+export function initializeDefaultProviders() {
+  const existing = getAllProviders();
+  if (existing.length > 0) return;
+
+  // Antigravity (local)
+  createProvider({
+    name: 'Antigravity',
+    base_url: 'http://127.0.0.1:8045',
+    api_keys: ['sk-antigravity-openclaw'],
+    route_type: 'local',
+    supported_models: ['claude-opus-4-5-thinking', 'claude-sonnet-4-5-thinking', 'gemini-3-pro-high'],
+    model_mapping: {},
+    priority: 1,
+    enabled: true,
+    recovery_minutes: 5
+  });
+
+  // v3.codesome.cn (domestic)
+  createProvider({
+    name: 'v3.codesome.cn',
+    base_url: 'https://v3.codesome.cn',
+    api_keys: ['sk-a80138d0'], // Placeholder - user needs to complete
+    route_type: 'domestic',
+    supported_models: ['claude-opus-4-5-thinking', 'claude-sonnet-4-5-thinking'],
+    model_mapping: {},
+    priority: 2,
+    enabled: true,
+    recovery_minutes: 3
+  });
+
+  // Anthropic Official (overseas - needs proxy)
+  createProvider({
+    name: 'Anthropic Official',
+    base_url: 'https://api.anthropic.com',
+    api_keys: [], // User needs to add their key
+    route_type: 'overseas',
+    supported_models: ['claude-opus-4-5-thinking', 'claude-sonnet-4-5-thinking', 'claude-3-5-sonnet-20241022'],
+    model_mapping: {},
+    priority: 4,
+    enabled: false, // Disabled until API key is added
+    recovery_minutes: 5
+  });
+}
+
+// Run initialization
+initializeDefaults();
+initializeDefaultProviders();
+
+export default db;

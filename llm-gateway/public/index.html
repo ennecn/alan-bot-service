@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Gateway Admin</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+    .fade-enter-from, .fade-leave-to { opacity: 0; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .status-healthy { background: #22c55e; }
+    .status-unhealthy { background: #ef4444; }
+    .status-exhausted { background: #f59e0b; }
+    .status-unknown { background: #9ca3af; }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+  <div id="app">
+    <!-- Navigation -->
+    <nav class="bg-gray-800 border-b border-gray-700">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between h-16">
+          <div class="flex items-center">
+            <span class="text-xl font-bold text-blue-400">LLM Gateway</span>
+          </div>
+          <div class="flex space-x-4">
+            <button @click="currentTab = 'dashboard'" :class="['px-3 py-2 rounded-md text-sm font-medium', currentTab === 'dashboard' ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700']">
+              Dashboard
+            </button>
+            <button @click="currentTab = 'providers'" :class="['px-3 py-2 rounded-md text-sm font-medium', currentTab === 'providers' ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700']">
+              Providers
+            </button>
+            <button @click="currentTab = 'clients'" :class="['px-3 py-2 rounded-md text-sm font-medium', currentTab === 'clients' ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700']">
+              Clients
+            </button>
+            <button @click="currentTab = 'settings'" :class="['px-3 py-2 rounded-md text-sm font-medium', currentTab === 'settings' ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700']">
+              Settings
+            </button>
+            <button @click="currentTab = 'logs'" :class="['px-3 py-2 rounded-md text-sm font-medium', currentTab === 'logs' ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700']">
+              Logs
+            </button>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+      <!-- Dashboard -->
+      <div v-if="currentTab === 'dashboard'" class="space-y-6">
+        <h1 class="text-2xl font-bold">Dashboard</h1>
+
+        <!-- Status Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <div class="text-sm text-gray-400">Active Provider</div>
+            <div class="text-xl font-semibold text-green-400">{{ status.active_provider || 'None' }}</div>
+          </div>
+          <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <div class="text-sm text-gray-400">Available</div>
+            <div class="text-xl font-semibold">{{ status.available_providers || 0 }} / {{ status.total_providers || 0 }}</div>
+          </div>
+          <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <div class="text-sm text-gray-400">Requests (24h)</div>
+            <div class="text-xl font-semibold">{{ stats.total || 0 }}</div>
+          </div>
+          <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <div class="text-sm text-gray-400">Avg Latency</div>
+            <div class="text-xl font-semibold">{{ stats.avg_latency_ms || 0 }}ms</div>
+          </div>
+        </div>
+
+        <!-- Provider Status -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700">
+          <div class="px-4 py-3 border-b border-gray-700">
+            <h2 class="text-lg font-semibold">Provider Status</h2>
+          </div>
+          <div class="p-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div v-for="provider in status.providers" :key="provider.id" class="bg-gray-700 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-medium">{{ provider.name }}</span>
+                  <div class="flex items-center space-x-2">
+                    <span :class="['status-dot', 'status-' + provider.health_status]"></span>
+                    <span class="text-xs text-gray-400">{{ provider.health_status }}</span>
+                  </div>
+                </div>
+                <div class="text-sm text-gray-400 space-y-1">
+                  <div>Priority: {{ provider.priority }}</div>
+                  <div>Type: {{ provider.route_type }}</div>
+                  <div v-if="provider.exhausted_until" class="text-yellow-400">
+                    Recovers: {{ formatTime(provider.exhausted_until) }}
+                  </div>
+                  <div v-if="provider.error_count > 0" class="text-red-400">
+                    Errors: {{ provider.error_count }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Logs -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700">
+          <div class="px-4 py-3 border-b border-gray-700 flex justify-between items-center">
+            <h2 class="text-lg font-semibold">Recent Requests</h2>
+            <button @click="loadLogs" class="text-sm text-blue-400 hover:text-blue-300">Refresh</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-700">
+              <thead class="bg-gray-700">
+                <tr>
+                  <th class="px-4 py-2 text-left text-xs font-medium text-gray-400">Time</th>
+                  <th class="px-4 py-2 text-left text-xs font-medium text-gray-400">Provider</th>
+                  <th class="px-4 py-2 text-left text-xs font-medium text-gray-400">Model</th>
+                  <th class="px-4 py-2 text-left text-xs font-medium text-gray-400">Status</th>
+                  <th class="px-4 py-2 text-left text-xs font-medium text-gray-400">Latency</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-700">
+                <tr v-for="log in logs.slice(0, 10)" :key="log.id" class="hover:bg-gray-700">
+                  <td class="px-4 py-2 text-sm">{{ formatTimestamp(log.timestamp) }}</td>
+                  <td class="px-4 py-2 text-sm">{{ log.provider_name }}</td>
+                  <td class="px-4 py-2 text-sm font-mono text-xs">{{ log.model }}</td>
+                  <td class="px-4 py-2">
+                    <span :class="['px-2 py-1 text-xs rounded', log.status_code >= 200 && log.status_code < 300 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300']">
+                      {{ log.status_code || 'ERR' }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2 text-sm">{{ log.latency_ms }}ms</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Providers -->
+      <div v-if="currentTab === 'providers'" class="space-y-6">
+        <div class="flex justify-between items-center">
+          <h1 class="text-2xl font-bold">Providers</h1>
+          <button @click="showAddProvider = true" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm font-medium">
+            Add Provider
+          </button>
+        </div>
+
+        <!-- Provider List -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-700">
+              <thead class="bg-gray-700">
+                <tr>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Priority</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Name</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Base URL</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Type</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Status</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Enabled</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-700">
+                <tr v-for="provider in providers" :key="provider.id" class="hover:bg-gray-700">
+                  <td class="px-4 py-3 text-sm">{{ provider.priority }}</td>
+                  <td class="px-4 py-3 text-sm font-medium">{{ provider.name }}</td>
+                  <td class="px-4 py-3 text-sm font-mono text-xs text-gray-400">{{ provider.base_url }}</td>
+                  <td class="px-4 py-3 text-sm">
+                    <span :class="['px-2 py-1 text-xs rounded', routeTypeColor(provider.route_type)]">
+                      {{ provider.route_type }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center space-x-2">
+                      <span :class="['status-dot', 'status-' + provider.health_status]"></span>
+                      <span class="text-sm">{{ provider.health_status }}</span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-3">
+                    <button @click="toggleProvider(provider)" :class="['relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors', provider.enabled ? 'bg-blue-600' : 'bg-gray-600']">
+                      <span :class="['pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition', provider.enabled ? 'translate-x-5' : 'translate-x-0']"></span>
+                    </button>
+                  </td>
+                  <td class="px-4 py-3 text-sm space-x-2">
+                    <button @click="editProvider(provider)" class="text-blue-400 hover:text-blue-300">Edit</button>
+                    <button @click="resetProvider(provider)" class="text-yellow-400 hover:text-yellow-300">Reset</button>
+                    <button @click="confirmDelete(provider)" class="text-red-400 hover:text-red-300">Delete</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Clients -->
+      <div v-if="currentTab === 'clients'" class="space-y-6">
+        <div class="flex justify-between items-center">
+          <h1 class="text-2xl font-bold">Clients</h1>
+          <button @click="showAddClient = true" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm font-medium">
+            Add Client
+          </button>
+        </div>
+
+        <!-- Client List -->
+        <div class="bg-gray-800 rounded-lg border border-gray-700">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-700">
+              <thead class="bg-gray-700">
+                <tr>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Name</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">API Key</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Default Model</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Provider Order</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Enabled</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Actions</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-700">
+                <tr v-for="client in clients" :key="client.id" class="hover:bg-gray-700">
+                  <td class="px-4 py-3 text-sm font-medium">{{ client.name }}</td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center space-x-2">
+                      <code class="text-xs bg-gray-700 px-2 py-1 rounded font-mono">{{ client.api_key.substring(0, 20) }}...</code>
+                      <button @click="copyToClipboard(client.api_key)" class="text-blue-400 hover:text-blue-300 text-xs">Copy</button>
+                    </div>
+                  </td>
+                  <td class="px-4 py-3 text-sm font-mono text-xs text-gray-400">{{ client.default_model || '-' }}</td>
+                  <td class="px-4 py-3 text-sm">
+                    <span v-if="client.provider_order.length > 0" class="text-xs">
+                      <span v-for="(pid, idx) in client.provider_order" :key="pid">
+                        {{ getProviderName(pid) }}<span v-if="idx < client.provider_order.length - 1" class="text-gray-500"> → </span>
+                      </span>
+                    </span>
+                    <span v-else class="text-gray-500 text-xs">Default</span>
+                  </td>
+                  <td class="px-4 py-3">
+                    <button @click="toggleClient(client)" :class="['relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors', client.enabled ? 'bg-blue-600' : 'bg-gray-600']">
+                      <span :class="['pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition', client.enabled ? 'translate-x-5' : 'translate-x-0']"></span>
+                    </button>
+                  </td>
+                  <td class="px-4 py-3 text-sm space-x-2">
+                    <button @click="editClient(client)" class="text-blue-400 hover:text-blue-300">Edit</button>
+                    <button @click="regenerateKey(client)" class="text-yellow-400 hover:text-yellow-300">Regen Key</button>
+                    <button @click="confirmDeleteClient(client)" class="text-red-400 hover:text-red-300">Delete</button>
+                  </td>
+                </tr>
+                <tr v-if="clients.length === 0">
+                  <td colspan="6" class="px-4 py-8 text-center text-gray-500">No clients configured. Requests without a matching API key will use global routing.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div v-if="currentTab === 'settings'" class="space-y-6">
+        <h1 class="text-2xl font-bold">Settings</h1>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Telegram Settings -->
+          <div class="bg-gray-800 rounded-lg border border-gray-700 p-4">
+            <h2 class="text-lg font-semibold mb-4">Telegram Notifications</h2>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Bot Token</label>
+                <input v-model="settings.telegram_bot_token" type="text" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Chat ID</label>
+                <input v-model="settings.telegram_chat_id" type="text" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Notification Cooldown (minutes)</label>
+                <input v-model="settings.notification_cooldown_minutes" type="number" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+          </div>
+
+          <!-- Proxy Settings -->
+          <div class="bg-gray-800 rounded-lg border border-gray-700 p-4">
+            <h2 class="text-lg font-semibold mb-4">Proxy Settings</h2>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">SOCKS5 Proxy URL</label>
+                <input v-model="settings.proxy_url" type="text" placeholder="socks5://user:pass@host:port" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-500 mt-1">Used for overseas providers</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Model Whitelist -->
+          <div class="bg-gray-800 rounded-lg border border-gray-700 p-4 lg:col-span-2">
+            <h2 class="text-lg font-semibold mb-4">Allowed Models</h2>
+            <div class="space-y-4">
+              <div class="flex flex-wrap gap-2">
+                <span v-for="(model, index) in settings.allowed_models" :key="index" class="inline-flex items-center bg-gray-700 rounded-full px-3 py-1 text-sm">
+                  {{ model }}
+                  <button @click="removeModel(index)" class="ml-2 text-gray-400 hover:text-red-400">&times;</button>
+                </span>
+              </div>
+              <div class="flex space-x-2">
+                <input v-model="newModel" type="text" placeholder="Add model name" class="flex-1 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" @keyup.enter="addModel">
+                <button @click="addModel" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm font-medium">Add</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button @click="saveSettings" class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded-md text-sm font-medium">
+          Save Settings
+        </button>
+      </div>
+
+      <!-- Logs -->
+      <div v-if="currentTab === 'logs'" class="space-y-6">
+        <div class="flex justify-between items-center">
+          <h1 class="text-2xl font-bold">Request Logs</h1>
+          <button @click="loadLogs" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-md text-sm font-medium">
+            Refresh
+          </button>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg border border-gray-700">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-700">
+              <thead class="bg-gray-700">
+                <tr>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Time</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Client</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Provider</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Model</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Status</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Latency</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Tokens</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Cascaded</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-gray-400">Error</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-700">
+                <tr v-for="log in logs" :key="log.id" class="hover:bg-gray-700">
+                  <td class="px-4 py-2 text-sm">{{ formatTimestamp(log.timestamp) }}</td>
+                  <td class="px-4 py-2 text-sm">
+                    <span v-if="log.client_name" class="px-2 py-1 text-xs rounded bg-indigo-900 text-indigo-300">{{ log.client_name }}</span>
+                    <span v-else class="text-gray-500 text-xs">-</span>
+                  </td>
+                  <td class="px-4 py-2 text-sm">{{ log.provider_name }}</td>
+                  <td class="px-4 py-2 text-sm font-mono text-xs">{{ log.model }}</td>
+                  <td class="px-4 py-2">
+                    <span :class="['px-2 py-1 text-xs rounded', log.status_code >= 200 && log.status_code < 300 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300']">
+                      {{ log.status_code || 'ERR' }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2 text-sm">{{ log.latency_ms || '-' }}ms</td>
+                  <td class="px-4 py-2 text-sm text-gray-400">
+                    {{ log.tokens_in || '-' }} / {{ log.tokens_out || '-' }}
+                  </td>
+                  <td class="px-4 py-2 text-sm text-yellow-400">{{ log.cascaded_from || '-' }}</td>
+                  <td class="px-4 py-2 text-sm text-red-400 max-w-xs truncate" :title="log.error_message">
+                    {{ log.error_type || '-' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add/Edit Provider Modal -->
+      <div v-if="showAddProvider || editingProvider" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div class="px-6 py-4 border-b border-gray-700 flex justify-between items-center">
+            <h2 class="text-lg font-semibold">{{ editingProvider ? 'Edit Provider' : 'Add Provider' }}</h2>
+            <button @click="closeProviderModal" class="text-gray-400 hover:text-white">&times;</button>
+          </div>
+          <div class="p-6 space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Name *</label>
+                <input v-model="providerForm.name" type="text" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Priority</label>
+                <input v-model.number="providerForm.priority" type="number" min="1" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Base URL *</label>
+              <input v-model="providerForm.base_url" type="text" placeholder="https://api.example.com" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">API Keys (one per line)</label>
+              <textarea v-model="providerForm.api_keys_text" rows="3" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"></textarea>
+            </div>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Route Type</label>
+                <select v-model="providerForm.route_type" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  <option value="local">Local</option>
+                  <option value="domestic">Domestic (China)</option>
+                  <option value="overseas">Overseas (via proxy)</option>
+                  <option value="direct">Direct</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-400 mb-1">Recovery Time (minutes)</label>
+                <input v-model.number="providerForm.recovery_minutes" type="number" min="1" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Supported Models (one per line, empty = all)</label>
+              <textarea v-model="providerForm.supported_models_text" rows="3" placeholder="claude-opus-4-5-thinking&#10;claude-sonnet-4-5-thinking" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"></textarea>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Model Mapping (JSON)</label>
+              <textarea v-model="providerForm.model_mapping_text" rows="2" placeholder='{"claude-opus-4-5": "claude-opus-4-5-20250101"}' class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"></textarea>
+            </div>
+          </div>
+          <div class="px-6 py-4 border-t border-gray-700 flex justify-end space-x-3">
+            <button @click="closeProviderModal" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm font-medium">Cancel</button>
+            <button @click="saveProvider" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-sm font-medium">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delete Confirmation Modal (Provider) -->
+      <div v-if="deletingProvider" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-md">
+          <h2 class="text-lg font-semibold mb-4">Delete Provider?</h2>
+          <p class="text-gray-400 mb-6">Are you sure you want to delete "{{ deletingProvider.name }}"? This action cannot be undone.</p>
+          <div class="flex justify-end space-x-3">
+            <button @click="deletingProvider = null" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm font-medium">Cancel</button>
+            <button @click="deleteProviderConfirmed" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-md text-sm font-medium">Delete</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add/Edit Client Modal -->
+      <div v-if="showAddClient || editingClient" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+          <div class="px-6 py-4 border-b border-gray-700 flex justify-between items-center">
+            <h2 class="text-lg font-semibold">{{ editingClient ? 'Edit Client' : 'Add Client' }}</h2>
+            <button @click="closeClientModal" class="text-gray-400 hover:text-white">&times;</button>
+          </div>
+          <div class="p-6 space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Name *</label>
+              <input v-model="clientForm.name" type="text" placeholder="e.g. Aling, Arin, Lain" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Default Model (optional, overrides request model if set)</label>
+              <input v-model="clientForm.default_model" type="text" placeholder="e.g. claude-sonnet-4-5-thinking" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Provider Priority Order</label>
+              <p class="text-xs text-gray-500 mb-2">Select providers in priority order. First = highest priority.</p>
+              <div class="space-y-2">
+                <div v-for="(pid, idx) in clientForm.provider_order" :key="idx" class="flex items-center space-x-2">
+                  <span class="text-xs text-gray-500 w-6">{{ idx + 1 }}.</span>
+                  <select v-model="clientForm.provider_order[idx]" class="flex-1 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }} (id={{ p.id }})</option>
+                  </select>
+                  <button @click="clientForm.provider_order.splice(idx, 1)" class="text-red-400 hover:text-red-300 text-sm">&times;</button>
+                </div>
+              </div>
+              <button @click="clientForm.provider_order.push(providers[0]?.id || 1)" class="mt-2 text-sm text-blue-400 hover:text-blue-300">+ Add Provider</button>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-1">Model Mapping (JSON, optional)</label>
+              <textarea v-model="clientForm.model_mapping_text" rows="3" placeholder='{"claude-opus-4-5-thinking": "claude-sonnet-4-5-thinking"}' class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"></textarea>
+            </div>
+          </div>
+          <div class="px-6 py-4 border-t border-gray-700 flex justify-end space-x-3">
+            <button @click="closeClientModal" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm font-medium">Cancel</button>
+            <button @click="saveClient" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-md text-sm font-medium">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delete Client Confirmation Modal -->
+      <div v-if="deletingClient" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6 max-w-md">
+          <h2 class="text-lg font-semibold mb-4">Delete Client?</h2>
+          <p class="text-gray-400 mb-6">Are you sure you want to delete "{{ deletingClient.name }}"? This action cannot be undone.</p>
+          <div class="flex justify-end space-x-3">
+            <button @click="deletingClient = null" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm font-medium">Cancel</button>
+            <button @click="deleteClientConfirmed" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-md text-sm font-medium">Delete</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div class="fixed bottom-4 right-4 space-y-2">
+      <transition-group name="fade">
+        <div v-for="toast in toasts" :key="toast.id" :class="['px-4 py-3 rounded-lg shadow-lg', toast.type === 'success' ? 'bg-green-800' : toast.type === 'error' ? 'bg-red-800' : 'bg-blue-800']">
+          {{ toast.message }}
+        </div>
+      </transition-group>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

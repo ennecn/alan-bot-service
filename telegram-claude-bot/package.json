@@ -1,0 +1,12 @@
+{
+  "name": "telegram-claude-bot",
+  "version": "1.0.0",
+  "description": "Telegram group bot powered by Claude Code on Mac Mini",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "grammy": "^1.35.0"
+  }
+}

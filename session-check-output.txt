@@ -1,0 +1,13 @@
+[0] queue-operation |  | 
+[1] user | user | 大哥………………
+[2] assistant | assistant | 咋了兄弟，有啥事说？😄
+[3] queue-operation |  | 
+[4] user | user | 你记得我跟你的上次对话吗？
+[5] assistant | assistant | 不记得哦，每次对话都是全新的开始，之前的聊天内容不会带过来。
+
+不过我有一个持久化的记忆文件，目前是空的，说明咱们之前没
+[6] queue-operation |  | 
+[7] user | user | 懂了，每次都是全新的开始对吧
+[8] assistant | assistant | 对，就是这样。每次对话都是独立的，不会自动带上之前的聊天记录。
+
+不过如果有什么你希望我跨会话记住的（比如项目习惯、偏好

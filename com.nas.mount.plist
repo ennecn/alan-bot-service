@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nas.mount</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>
+            # Wait for network
+            sleep 10
+
+            # Create mount point if not exists
+            mkdir -p /tmp/nas
+
+            # Check if already mounted
+            if ! mount | grep -q "/tmp/nas"; then
+                # Mount NAS
+                mount -t smbfs '//alin:yh7S8jNW@192.168.21.135/aling' /tmp/nas
+                echo "$(date): NAS mounted" >> /var/log/nas-mount.log
+            else
+                echo "$(date): NAS already mounted" >> /var/log/nas-mount.log
+            fi
+        </string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/nas-mount.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/nas-mount-error.log</string>
+</dict>
+</plist>

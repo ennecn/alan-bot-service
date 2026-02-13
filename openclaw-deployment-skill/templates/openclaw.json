@@ -1,0 +1,32 @@
+{
+  "channels": {
+    "telegram": {
+      "enabled": false,
+      "botToken": "YOUR_TELEGRAM_BOT_TOKEN",
+      "dmPolicy": "open",
+      "allowFrom": ["*"],
+      "groupPolicy": "open",
+      "streamMode": "partial"
+    },
+    "discord": {
+      "enabled": false,
+      "token": "YOUR_DISCORD_BOT_TOKEN",
+      "groupPolicy": "open",
+      "dm": {
+        "policy": "open",
+        "allowFrom": ["*"]
+      }
+    }
+  },
+  "browser": {
+    "enabled": true,
+    "defaultProfile": "openclaw"
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "apiKey": "YOUR_BRAVE_SEARCH_API_KEY"
+      }
+    }
+  }
+}

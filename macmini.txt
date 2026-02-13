@@ -1,0 +1,21 @@
+System Information Summary
+  ┌───────────────┬─────────────────────────────────────────────────────────────────────┐
+  │     Item      │                               Result                                │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ IP Addresses  │ 127.0.0.1 (localhost), 192.168.21.111 (LAN), 198.18.0.1 (VPN/proxy) │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ SSH Status    │ Requires sudo permission to check                                   │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ Docker        │ Not installed (command not found)                                   │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ macOS Version │ 15.7.1 (Build 24G231)                                               │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ Architecture  │ Apple Silicon (arm64)                                               │
+  ├───────────────┼─────────────────────────────────────────────────────────────────────┤
+  │ Port 18789    │ Available (not in use)                                              │
+  └───────────────┴─────────────────────────────────────────────────────────────────────┘
+  Key observations:
+  - Your local network IP is 192.168.21.111
+  - Docker is not installed - you'll need to install Docker Desktop for Mac (Apple Silicon version) if needed
+  - Port 18789 is free and ready for use
+  - Running on Apple Silicon Mac with macOS Sequoia 15.7.1
