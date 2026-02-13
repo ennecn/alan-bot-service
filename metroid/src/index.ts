@@ -2,14 +2,16 @@ import { defaultConfig, type MetroidConfig } from './config.js';
 import { getDb, closeDb } from './db/index.js';
 import { AuditLog } from './security/audit.js';
 import { MemoryEngine } from './engines/memory/index.js';
+import { IdentityEngine } from './engines/identity/index.js';
 import { PromptCompiler } from './compiler/index.js';
-import type { MetroidMessage, EngineContext } from './types.js';
+import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
 
 export class Metroid {
   private db;
   private audit: AuditLog;
   private memory: MemoryEngine;
+  private identity: IdentityEngine;
   private compiler: PromptCompiler;
   private client: Anthropic;
   private config: MetroidConfig;
@@ -19,7 +21,9 @@ export class Metroid {
     this.db = getDb(this.config);
     this.audit = new AuditLog(this.db);
     this.memory = new MemoryEngine(this.db, this.audit, this.config);
+    this.identity = new IdentityEngine(this.db);
     this.compiler = new PromptCompiler(this.config);
+    this.compiler.registerEngine(this.identity);
     this.compiler.registerEngine(this.memory);
 
     this.client = new Anthropic({
@@ -28,17 +32,32 @@ export class Metroid {
     });
   }
 
+  /** Create a new agent from a Metroid Card */
+  createAgent(name: string, card: MetroidCard): AgentIdentity {
+    return this.identity.createAgent(name, card);
+  }
+
+  /** Get an existing agent */
+  getAgent(id: string): AgentIdentity | undefined {
+    return this.identity.getAgent(id);
+  }
+
+  /** List all agents */
+  getAllAgents(): AgentIdentity[] {
+    return this.identity.getAllAgents();
+  }
+
   /** Start background processes for an agent */
   start(agentId: string): void {
     this.memory.start(agentId);
-    console.log(`[Metroid] Agent ${agentId} started`);
+    const agent = this.identity.getAgent(agentId);
+    console.log(`[Metroid] Agent ${agent?.name ?? agentId} started`);
   }
 
   /** Process an incoming message and generate a response */
   async chat(
     agentId: string,
     message: MetroidMessage,
-    systemPrompt: string,
     history: MetroidMessage[] = [],
   ): Promise<string> {
     const context: EngineContext = {
@@ -47,8 +66,11 @@ export class Metroid {
       conversationHistory: history,
     };
 
-    // Compile prompt with all engine contributions
-    const compiledPrompt = await this.compiler.compile(systemPrompt, context);
+    // Compile prompt — identity + memory + other engines contribute fragments
+    const compiledPrompt = await this.compiler.compile(
+      '你是一个有记忆、有情感、会成长的AI。请根据你的身份和记忆自然地回复。',
+      context,
+    );
 
     // Build message history for LLM
     const messages: Anthropic.MessageParam[] = [
