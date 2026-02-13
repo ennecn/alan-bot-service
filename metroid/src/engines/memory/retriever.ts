@@ -13,18 +13,19 @@ export class MemoryRetriever {
   async retrieve(query: MemoryQuery): Promise<MemoryScore[]> {
     const limit = query.limit ?? 5;
     const keywords = this.extractKeywords(query.text);
+    const includeFaded = query.includesFaded ?? false;
 
     // Layer 1: Keyword match (coarse, up to 100)
     let candidates: Memory[] = [];
     for (const kw of keywords) {
-      const matches = this.store.searchByKeyword(query.agentId, kw, 100);
+      const matches = this.store.searchByKeyword(query.agentId, kw, 100, includeFaded);
       candidates.push(...matches);
     }
 
     // Layer 2: Time window (also fetch recent as fallback)
     const timeHours = query.timeWindowHours ?? 72;
     const recentMemories = this.store.searchByTimeWindow(
-      query.agentId, timeHours, 100
+      query.agentId, timeHours, 100, includeFaded
     );
 
     // Merge and deduplicate

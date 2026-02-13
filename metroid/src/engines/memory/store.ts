@@ -37,9 +37,21 @@ export class MemoryStore {
         ORDER BY created_at DESC LIMIT ?
       `),
 
+      searchByKeywordsAll: this.db.prepare(`
+        SELECT * FROM memories
+        WHERE agent_id = ? AND keywords LIKE ?
+        ORDER BY created_at DESC LIMIT ?
+      `),
+
       searchByTimeWindow: this.db.prepare(`
         SELECT * FROM memories
         WHERE agent_id = ? AND faded_at IS NULL AND created_at > datetime('now', ?)
+        ORDER BY created_at DESC LIMIT ?
+      `),
+
+      searchByTimeWindowAll: this.db.prepare(`
+        SELECT * FROM memories
+        WHERE agent_id = ? AND created_at > datetime('now', ?)
         ORDER BY created_at DESC LIMIT ?
       `),
 
@@ -77,13 +89,15 @@ export class MemoryStore {
     return row ? this.rowToMemory(row) : null;
   }
 
-  searchByKeyword(agentId: string, keyword: string, limit = 100): Memory[] {
-    const rows = this.stmts.searchByKeywords.all(agentId, `%${keyword}%`, limit) as any[];
+  searchByKeyword(agentId: string, keyword: string, limit = 100, includeFaded = false): Memory[] {
+    const stmt = includeFaded ? this.stmts.searchByKeywordsAll : this.stmts.searchByKeywords;
+    const rows = stmt.all(agentId, `%${keyword}%`, limit) as any[];
     return rows.map(r => this.rowToMemory(r));
   }
 
-  searchByTimeWindow(agentId: string, hours: number, limit = 100): Memory[] {
-    const rows = this.stmts.searchByTimeWindow.all(agentId, `-${hours} hours`, limit) as any[];
+  searchByTimeWindow(agentId: string, hours: number, limit = 100, includeFaded = false): Memory[] {
+    const stmt = includeFaded ? this.stmts.searchByTimeWindowAll : this.stmts.searchByTimeWindow;
+    const rows = stmt.all(agentId, `-${hours} hours`, limit) as any[];
     return rows.map(r => this.rowToMemory(r));
   }
 
