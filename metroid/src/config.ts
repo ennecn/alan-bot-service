@@ -26,6 +26,20 @@ export interface MetroidConfig {
   compiler: {
     responseReserveRatio: number; // portion reserved for response
   };
+
+  // Emotion engine
+  emotion: {
+    minChangeInterval: number;   // ms between updates
+    maxChangePerUpdate: number;  // max PAD axis delta
+    recoveryRate: number;        // per-hour drift toward baseline
+  };
+
+  // Growth engine
+  growth: {
+    evaluationInterval: number;  // evaluate every N messages
+    minConfidence: number;       // threshold to apply change
+    maxActiveChanges: number;    // cap on active behavioral changes
+  };
 }
 
 const dataDir = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
@@ -52,5 +66,17 @@ export const defaultConfig: MetroidConfig = {
 
   compiler: {
     responseReserveRatio: 0.3,
+  },
+
+  emotion: {
+    minChangeInterval: 30_000,
+    maxChangePerUpdate: 0.3,
+    recoveryRate: 0.05,
+  },
+
+  growth: {
+    evaluationInterval: 10,
+    minConfidence: 0.5,
+    maxActiveChanges: 20,
   },
 };

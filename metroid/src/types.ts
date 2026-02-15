@@ -2,6 +2,7 @@
 
 export type MemoryType = 'working' | 'stm' | 'semantic' | 'episodic' | 'procedural';
 export type PrivacyLevel = 'public' | 'private' | 'sensitive';
+export type AgentMode = 'classic' | 'enhanced';
 
 export interface Memory {
   id: string;
@@ -44,6 +45,25 @@ export interface EmotionState {
   dominance: number;        // -1.0 ~ +1.0
 }
 
+export interface EmotionUpdate {
+  delta: EmotionState;
+  source: string;           // 'conversation' | 'recovery' | 'manual'
+  timestamp: Date;
+}
+
+// === Growth Types ===
+
+export interface BehavioralChange {
+  id: string;
+  agentId: string;
+  observation: string;
+  adaptation: string;
+  confidence: number;       // 0.0 - 1.0
+  active: boolean;
+  createdAt: Date;
+  revertedAt?: Date;
+}
+
 // === Identity Types ===
 
 export interface AgentIdentity {
@@ -51,6 +71,7 @@ export interface AgentIdentity {
   name: string;
   card: MetroidCard;
   emotionState: EmotionState;
+  mode: AgentMode;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -88,12 +109,18 @@ export interface MetroidCard {
 
 // === Prompt Compiler Types ===
 
+export type STPosition = 'before_char' | 'after_char' | 'before_an' | 'after_an' | 'at_depth';
+
 export interface PromptFragment {
   source: string;           // "memory" | "world" | "emotion" | "identity" | "tool"
   content: string;
   priority: number;         // 0-100, higher = more important
   tokens: number;           // estimated token count
   required: boolean;        // true = must include
+
+  // ST-compatible fields (used in classic mode)
+  position?: STPosition;    // where to place in ST-style assembly
+  depth?: number;           // for position='at_depth'
 }
 
 // === Channel Types ===
@@ -138,6 +165,7 @@ export interface Engine {
 
 export interface EngineContext {
   agentId: string;
+  mode: AgentMode;
   message: MetroidMessage;
   conversationHistory: MetroidMessage[];
 }

@@ -26,6 +26,7 @@ const testCard: MetroidCard = {
 
 const mockContext = (agentId: string): EngineContext => ({
   agentId,
+  mode: 'enhanced',
   message: {
     id: 'msg-1', channel: 'telegram',
     author: { id: 'user-1', name: 'User', isBot: false },
@@ -94,6 +95,29 @@ describe('IdentityEngine', () => {
     identity.createAgent('小凛', testCard);
     identity.createAgent('Lain', { ...testCard, name: 'Lain' });
     expect(identity.getAllAgents()).toHaveLength(2);
+  });
+
+  it('should create agent with default classic mode', () => {
+    const agent = identity.createAgent('小凛', testCard);
+    expect(agent.mode).toBe('classic');
+  });
+
+  it('should create agent with specified mode', () => {
+    const agent = identity.createAgent('小凛', testCard, 'enhanced');
+    expect(agent.mode).toBe('enhanced');
+  });
+
+  it('should switch agent mode', () => {
+    const agent = identity.createAgent('小凛', testCard);
+    expect(agent.mode).toBe('classic');
+
+    identity.setMode(agent.id, 'enhanced');
+    const updated = identity.getAgent(agent.id);
+    expect(updated!.mode).toBe('enhanced');
+
+    // Persists across instances
+    const identity2 = new IdentityEngine(db);
+    expect(identity2.getAgent(agent.id)!.mode).toBe('enhanced');
   });
 
   it('should set emotion baseline from card', () => {

@@ -1,11 +1,12 @@
-import type { Engine, EngineContext, PromptFragment } from '../types.js';
+import type { Engine, EngineContext, PromptFragment, AgentMode } from '../types.js';
 import type { MetroidConfig } from '../config.js';
 
 /**
  * Prompt Compiler: assembles final prompt from engine fragments.
  *
- * Priority-based greedy packing within token budget.
- * Phase 1: fixed budget allocation, no dynamic adjustment.
+ * Two modes:
+ * - Classic: ST-style assembly with position/depth ordering
+ * - Enhanced: priority-based greedy packing within token budget
  */
 export class PromptCompiler {
   private engines: Engine[] = [];
@@ -18,7 +19,6 @@ export class PromptCompiler {
 
   /**
    * Compile the final system prompt from all engine fragments.
-   * Returns assembled prompt string.
    */
   async compile(
     baseSystemPrompt: string,
@@ -26,8 +26,6 @@ export class PromptCompiler {
   ): Promise<string> {
     const maxTokens = this.config.llm.maxContextTokens;
     const budget = Math.floor(maxTokens * (1 - this.config.compiler.responseReserveRatio));
-
-    // Base system prompt is always included
     const baseTokens = this.estimateTokens(baseSystemPrompt);
     let remainingBudget = budget - baseTokens;
 
@@ -45,36 +43,10 @@ export class PromptCompiler {
       }
     }
 
-    // Required fragments first, then sort by priority
-    const required = allFragments.filter(f => f.required);
-    const optional = allFragments
-      .filter(f => !f.required)
-      .sort((a, b) => b.priority - a.priority);
-
-    const included: PromptFragment[] = [];
-
-    // Include all required fragments
-    for (const f of required) {
-      if (f.tokens <= remainingBudget) {
-        included.push(f);
-        remainingBudget -= f.tokens;
-      }
+    if (context.mode === 'classic') {
+      return this.assembleClassic(baseSystemPrompt, allFragments, remainingBudget);
     }
-
-    // Greedily pack optional fragments by priority
-    for (const f of optional) {
-      if (f.tokens <= remainingBudget) {
-        included.push(f);
-        remainingBudget -= f.tokens;
-      }
-    }
-
-    // Assemble final prompt
-    const sections = included
-      .sort((a, b) => this.sectionOrder(a.source) - this.sectionOrder(b.source))
-      .map(f => f.content);
-
-    return [baseSystemPrompt, ...sections].join('\n\n');
+    return this.assembleEnhanced(baseSystemPrompt, allFragments, remainingBudget);
   }
 
   /** Notify all engines after LLM response */
@@ -86,19 +58,93 @@ export class PromptCompiler {
     );
   }
 
-  /** Rough token estimation: ~4 chars per token for mixed CJK/English */
+  /**
+   * Classic mode: ST-style assembly.
+   * Order: before_char → identity → after_char → world(no position) → at_depth → before_an → after_an
+   */
+  private assembleClassic(
+    base: string,
+    fragments: PromptFragment[],
+    budget: number,
+  ): string {
+    // ST position ordering
+    const posOrder: Record<string, number> = {
+      before_char: 0,
+      // identity fragments (no position) go at 1
+      after_char: 2,
+      at_depth: 3,
+      before_an: 4,
+      after_an: 5,
+    };
+
+    const sorted = [...fragments].sort((a, b) => {
+      const aPos = a.position ? posOrder[a.position] ?? 3 : (a.source === 'identity' ? 1 : 3);
+      const bPos = b.position ? posOrder[b.position] ?? 3 : (b.source === 'identity' ? 1 : 3);
+      if (aPos !== bPos) return aPos - bPos;
+      return b.priority - a.priority; // within same position, higher priority first
+    });
+
+    const included: PromptFragment[] = [];
+    let remaining = budget;
+
+    for (const f of sorted) {
+      if (f.required || f.tokens <= remaining) {
+        included.push(f);
+        remaining -= f.tokens;
+      }
+    }
+
+    return [base, ...included.map(f => f.content)].join('\n\n');
+  }
+
+  /** Enhanced mode: priority-based greedy packing */
+  private assembleEnhanced(
+    base: string,
+    fragments: PromptFragment[],
+    budget: number,
+  ): string {
+    const required = fragments.filter(f => f.required);
+    const optional = fragments
+      .filter(f => !f.required)
+      .sort((a, b) => b.priority - a.priority);
+
+    const included: PromptFragment[] = [];
+    let remaining = budget;
+
+    for (const f of required) {
+      if (f.tokens <= remaining) {
+        included.push(f);
+        remaining -= f.tokens;
+      }
+    }
+
+    for (const f of optional) {
+      if (f.tokens <= remaining) {
+        included.push(f);
+        remaining -= f.tokens;
+      }
+    }
+
+    // Order by section type for readability
+    const sections = included
+      .sort((a, b) => this.sectionOrder(a.source) - this.sectionOrder(b.source))
+      .map(f => f.content);
+
+    return [base, ...sections].join('\n\n');
+  }
+
   private estimateTokens(text: string): number {
     return Math.ceil(text.length / 3);
   }
 
-  /** Ordering for final prompt assembly */
   private sectionOrder(source: string): number {
     const order: Record<string, number> = {
       identity: 0,
       emotion: 1,
       world: 2,
       memory: 3,
-      tool: 4,
+      growth: 4,
+      tool: 5,
     };
     return order[source] ?? 5;
   }

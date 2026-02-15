@@ -17,7 +17,7 @@ interface STWorldEntry {
   selective: boolean;
   selectiveLogic: number;  // 0=AND_ANY, 1=NOT_ALL, 2=NOT_ANY, 3=AND_ALL
   order: number;
-  position: number;        // 0=before_char, 3=after_char
+  position: number;        // 0=before_char, 1=after_char, 2=before_an, 3=after_an, 4=at_depth
   disable: boolean;
   depth: number;
   probability: number;
@@ -33,8 +33,24 @@ export interface WorldImportResult {
   warnings: string[];
 }
 
+const SELECTIVE_LOGIC_MAP: Record<number, string> = {
+  0: 'AND_ANY',
+  1: 'NOT_ALL',
+  2: 'NOT_ANY',
+  3: 'AND_ALL',
+};
+
+const POSITION_MAP: Record<number, string> = {
+  0: 'before_char',
+  1: 'after_char',
+  2: 'before_an',
+  3: 'after_an',
+  4: 'at_depth',
+};
+
 /**
  * Import a SillyTavern World Info JSON file into Metroid's world_entries table.
+ * All ST fields are preserved for classic mode compatibility.
  */
 export function importSTWorldInfo(
   jsonPath: string,
@@ -55,7 +71,6 @@ export function importSTCharacterBook(
   charName?: string,
   userName?: string,
 ): WorldImportResult {
-  // Convert STBookEntry to STWorldEntry-like format
   const entries: STWorldEntry[] = book.entries.map(e => ({
     key: e.keys,
     keysecondary: e.secondary_keys,
@@ -89,29 +104,17 @@ function importEntries(
   let skipped = 0;
 
   const insert = db.prepare(`
-    INSERT INTO world_entries (id, keywords, content, priority, scope, scope_target, enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO world_entries (
+      id, keywords, secondary_keywords, content, priority,
+      scope, scope_target, enabled,
+      selective_logic, position, depth, probability, constant
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertMany = db.transaction((items: STWorldEntry[]) => {
     for (const entry of items) {
-      // Skip disabled entries
-      if (entry.disable) {
-        skipped++;
-        continue;
-      }
-
-      // Skip empty content
-      if (!entry.content?.trim()) {
-        skipped++;
-        continue;
-      }
-
-      // Combine primary and secondary keywords
-      const allKeywords = [...entry.key];
-      if (entry.selective && entry.keysecondary?.length) {
-        allKeywords.push(...entry.keysecondary);
-      }
+      if (entry.disable) { skipped++; continue; }
+      if (!entry.content?.trim()) { skipped++; continue; }
 
       // Replace ST placeholders
       let content = entry.content;
@@ -121,27 +124,26 @@ function importEntries(
       // Map ST priority: constant entries get high priority, others use order
       const priority = entry.constant ? 9 : Math.min(9, Math.max(1, Math.round(entry.order / 20)));
 
-      // Note unsupported features
-      if (entry.selective && entry.selectiveLogic !== 0) {
-        warnings.push(
-          `条目 "${allKeywords[0] || entry.uid}": 使用了高级选择逻辑(${entry.selectiveLogic})，` +
-          `Metroid 当前仅支持 OR 匹配`
-        );
-      }
-      if (entry.useProbability && entry.probability < 100) {
-        warnings.push(
-          `条目 "${allKeywords[0] || entry.uid}": 概率触发(${entry.probability}%)暂不支持，已设为始终启用`
-        );
-      }
+      // Map selective logic and position
+      const selectiveLogic = entry.selective ? (SELECTIVE_LOGIC_MAP[entry.selectiveLogic] ?? null) : null;
+      const position = POSITION_MAP[entry.position] ?? null;
+      const secondaryKws = entry.selective && entry.keysecondary?.length
+        ? entry.keysecondary.join(',') : null;
 
       insert.run(
         randomUUID(),
-        allKeywords.join(','),
+        entry.key.join(','),
+        secondaryKws,
         content,
         priority,
         'all',
         null,
         1,
+        selectiveLogic,
+        position,
+        entry.depth ?? null,
+        entry.useProbability ? entry.probability : 100,
+        entry.constant ? 1 : 0,
       );
       imported++;
     }

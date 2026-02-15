@@ -5,6 +5,7 @@ import type { Engine, EngineContext, PromptFragment } from '../src/types.js';
 
 const mockContext: EngineContext = {
   agentId: 'test-agent',
+  mode: 'enhanced',
   message: {
     id: 'msg-1', channel: 'telegram',
     author: { id: 'user-1', name: 'User', isBot: false },
@@ -12,6 +13,8 @@ const mockContext: EngineContext = {
   },
   conversationHistory: [],
 };
+
+const classicContext: EngineContext = { ...mockContext, mode: 'classic' };
 
 function makeEngine(name: string, fragments: PromptFragment[]): Engine {
   return {
@@ -96,5 +99,35 @@ describe('PromptCompiler', () => {
 
     const result = await compiler.compile('B', mockContext);
     expect(result).toContain('REQUIRED');
+  });
+
+  it('should order by ST position in classic mode', async () => {
+    const compiler = new PromptCompiler(defaultConfig);
+
+    compiler.registerEngine(makeEngine('identity', [{
+      source: 'identity', content: 'IDENTITY',
+      priority: 95, tokens: 5, required: true,
+    }]));
+    compiler.registerEngine(makeEngine('world', [
+      {
+        source: 'world', content: 'BEFORE_CHAR',
+        priority: 50, tokens: 5, required: false,
+        position: 'before_char' as const,
+      },
+      {
+        source: 'world', content: 'AFTER_CHAR',
+        priority: 50, tokens: 5, required: false,
+        position: 'after_char' as const,
+      },
+    ]));
+
+    const result = await compiler.compile('Base.', classicContext);
+
+    // Classic mode: before_char(0) → identity(1) → after_char(2)
+    const beforeIdx = result.indexOf('BEFORE_CHAR');
+    const identityIdx = result.indexOf('IDENTITY');
+    const afterIdx = result.indexOf('AFTER_CHAR');
+    expect(beforeIdx).toBeLessThan(identityIdx);
+    expect(identityIdx).toBeLessThan(afterIdx);
   });
 });

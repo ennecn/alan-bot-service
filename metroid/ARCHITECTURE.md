@@ -2,6 +2,8 @@
 
 > "能自我进化的生物体"
 >
+> v2.1 — 双模式架构：经典模式（ST 兼容）+ 增强模式（Metroid 原生）
+>
 > v2.0 — 整合阿凛、Lain、Lumi、阿澪四位 Agent 的评审反馈
 
 ## 1. 设计哲学
@@ -19,6 +21,7 @@ Metroid 融合两个世界的精华：
 5. **安全优先** — 敏感操作需确认，变更日志不可删，紧急回滚可用 *(from 阿凛)*
 6. **优雅降级** — LLM 挂了不等于 Agent 挂了 *(from 阿凛)*
 7. **快速验证** — 先跑起来，在真实对话中迭代 *(from 阿澪)*
+8. **双模式兼容** — 经典模式忠实复刻 ST 行为，增强模式释放 Metroid 全部能力，一键切换，不是两套系统
 
 ## 2. 系统架构总览
 
@@ -55,6 +58,55 @@ Metroid 融合两个世界的精华：
 3. 各 Engine 返回带优先级的 prompt 片段
 4. Compiler 在 token budget 内组装最终 prompt
 5. LLM 返回后，各 Engine 异步处理（记忆编码、情绪更新等）
+
+## 2.1 双模式架构 — 一套引擎，两种编译
+
+> 核心决策：不维护两套运行时，而是让同一套引擎栈支持两种 prompt 组装方式。
+
+```
+用户导入 ST 卡 → 默认经典模式 → 一键切换增强模式
+                                    ↕ 随时可切回
+
+经典模式 (Classic)                增强模式 (Enhanced)
+┌─────────────────┐              ┌─────────────────┐
+│ Identity Engine  │              │ Identity Engine  │
+│ World Engine     │              │ World Engine     │
+│ (ST features ON) │              │ Memory Engine    │
+│                  │              │ Emotion Engine   │
+│ Memory: OFF      │              │ Growth Engine    │
+│ Emotion: OFF     │              │ Social Engine    │
+│ Growth: OFF      │              │ (ST features as  │
+│                  │              │  subset, plus    │
+│                  │              │  advanced trigger)│
+├─────────────────┤              ├─────────────────┤
+│ ST-style Prompt  │              │ Priority-based   │
+│ Assembly         │              │ Prompt Assembly  │
+│ (position/depth) │              │ (greedy packing) │
+└─────────────────┘              └─────────────────┘
+```
+
+**经典模式 (Classic)**：
+- 只激活 Identity + World 引擎
+- World Engine 完整执行 ST 的 selective logic、position/depth、probability
+- Prompt 按 ST 的固定位置组装（system → scenario → world info at depth → author's note → chat history）
+- 行为与 SillyTavern 一致，导入的卡和世界书零损耗运行
+
+**增强模式 (Enhanced)**：
+- 全引擎栈激活（Identity + World + Memory + Emotion + Growth + Social）
+- World Engine 的 ST 特性仍然可用，但额外支持语义触发、上下文感知触发
+- Prompt 用 priority-based 贪心组装，token budget 动态分配
+- Growth Engine 可以随时间修改 World entries 和 mutable traits
+
+**切换机制**：
+- 每个 Agent 有 `mode: 'classic' | 'enhanced'` 字段
+- 切换是即时的，不需要重新导入数据
+- 经典模式下 Memory/Emotion/Growth 引擎不运行，不消耗资源
+- 增强模式下 ST 的 position/depth 配置被忽略（由 priority 系统接管）
+
+**为什么不是两套运行时**：
+- 引擎代码只有一份，WorldEngine 的 ST 特性是配置项而非独立引擎
+- 避免语义冲突：经典模式下不存在"静态 ST 定义 vs 动态 Metroid 演化"的矛盾
+- 一次性实现 ST 特性，不需要持续追踪 ST 的更新
 
 ## 3. Memory System — 选择性记忆
 
@@ -219,7 +271,15 @@ ST Card V2 (PNG with embedded JSON)
         → soul.immutable_values = [] (空, 需手动设置)
         → emotion.baseline = neutral
         → growth.enabled = false (保持原始设定)
+      → ST 特有字段完整保留
+        → character_book entries → world_entries (含 selective_logic, position, depth, probability)
+        → 默认 mode = 'classic' (经典模式)
 ```
+
+导入后用户可以：
+1. 直接在经典模式下使用，行为与 ST 一致
+2. 一键切换到增强模式，激活记忆/情感/成长
+3. 切回经典模式，增强层静默，回到纯 ST 行为
 
 ## 5. Emotion Engine — 读空气
 
@@ -280,6 +340,13 @@ entries:
     enabled: true
     scope: "all"          # all / specific_agent / specific_user
 
+    # === ST 兼容字段（经典模式使用）===
+    secondary_keywords: ["硬件", "部署"]
+    selective_logic: "AND_ANY"   # AND_ANY / NOT_ALL / NOT_ANY / AND_ALL
+    position: "after_char"       # before_char / after_char / before_an / after_an / at_depth
+    depth: 4                     # 仅 position=at_depth 时生效
+    probability: 100             # 0-100, 触发概率
+
   - keywords: ["阿凛", "性格"]
     content: "阿凛是团队里最活泼的..."
     priority: 6
@@ -289,11 +356,24 @@ entries:
 
 ### 6.2 触发机制
 
-与 ST 相同的关键词触发：
-1. 用户消息中出现 keywords → 注入对应 content
-2. 支持正则匹配
-3. 支持 AND/OR 逻辑
-4. token budget 内按 priority 排序截断
+**经典模式（完整 ST 兼容）**：
+1. 扫描用户消息 + 最近 N 条历史（N = scan_depth，默认 4）
+2. 主关键词匹配（OR 逻辑：任一命中即触发）
+3. 副关键词 + selective_logic 过滤：
+   - `AND_ANY`：副关键词至少命中一个
+   - `NOT_ALL`：副关键词不能全部命中
+   - `NOT_ANY`：副关键词一个都不能命中
+   - `AND_ALL`：副关键词必须全部命中
+4. probability 概率过滤（随机数 < probability 才通过）
+5. 按 position/depth 插入到 prompt 的指定位置
+6. 支持正则匹配（`/pattern/` 语法）
+
+**增强模式（Metroid 原生）**：
+1. 基础关键词触发（同上，但忽略 position/depth）
+2. 语义触发（未来）：基于上下文语义相似度触发，不依赖精确关键词
+3. 上下文感知触发（未来）：根据对话阶段、情绪状态动态调整触发阈值
+4. 按 priority 排序，由 Prompt Compiler 统一分配位置
+5. Growth Engine 可动态修改条目（如角色成长后更新世界观描述）
 
 ### 6.3 动态世界知识
 
@@ -375,7 +455,42 @@ Layer 3: 群体动力学 (远期)
 
 ## 9. Prompt Compiler — 上下文组装
 
-### 9.1 Token Budget 管理
+### 9.1 双模式编译
+
+Prompt Compiler 是双模式架构的核心切换点。同一套引擎的输出，按不同策略组装。
+
+**经典模式 — ST 风格组装**：
+
+```
+[System Prompt]
+  ├── Character Description
+  ├── Character Personality
+  └── Scenario
+[World Info: position=before_char]
+[World Info: position=after_char]
+[Chat History]
+  └── [World Info: position=at_depth, depth=N] ← 插入到倒数第 N 条消息之前
+[Author's Note]
+  ├── [World Info: position=before_an]
+  └── [World Info: position=after_an]
+[User Message]
+```
+
+- 位置固定，严格按 ST 的 position/depth 规则
+- 只有 Identity + World 引擎的输出
+- Token budget 按 ST 的方式分配（角色卡优先，世界书按 priority 截断）
+
+**增强模式 — Priority-based 贪心组装**：
+
+```
+1. 计算可用 budget
+2. 向所有活跃引擎请求 prompt 片段 (带 priority)
+3. required=true 的片段先填充
+4. 剩余片段按 priority 降序贪心填充
+5. 生成最终 prompt
+```
+
+### 9.2 Token Budget 管理（增强模式）
 
 ```
 Total Budget: model_context_window × 0.7 (留 30% 给回复)
@@ -391,17 +506,6 @@ Total Budget: model_context_window × 0.7 (留 30% 给回复)
 8. Growth Context               — 动态, 2-5%
 ```
 
-### 9.2 组装流程
-
-```
-1. 计算可用 budget
-2. 填充固定部分 (system, soul, emotion)
-3. 向各 Engine 请求 prompt 片段 (带 priority)
-4. 按 priority 排序所有片段
-5. 贪心填充直到 budget 用完
-6. 生成最终 prompt
-```
-
 ### 9.3 Prompt 片段格式
 
 ```typescript
@@ -411,6 +515,10 @@ interface PromptFragment {
   priority: number;     // 0-100, 越高越优先
   tokens: number;       // 预估 token 数
   required: boolean;    // true = 必须包含
+
+  // ST 兼容字段（经典模式使用）
+  position?: string;    // "before_char" | "after_char" | "before_an" | "after_an" | "at_depth"
+  depth?: number;       // position=at_depth 时的深度值
 }
 ```
 
@@ -614,9 +722,15 @@ Agent 不应该因为某个组件故障而完全停摆。
 memories (id, agent_id, type, content, importance, confidence,
           privacy, emotion_context, created_at, faded_at)
 
-agents (id, name, card_json, emotion_state, created_at)
+agents (id, name, card_json, emotion_state, mode, created_at)
+-- mode: 'classic' | 'enhanced', 默认 'classic'
 
-world_entries (id, keywords, content, priority, scope, enabled)
+world_entries (id, keywords, secondary_keywords, content, priority,
+              scope, enabled, selective_logic, position, depth, probability)
+-- selective_logic: 'AND_ANY' | 'NOT_ALL' | 'NOT_ANY' | 'AND_ALL', 默认 NULL
+-- position: 'before_char' | 'after_char' | 'before_an' | 'after_an' | 'at_depth', 默认 NULL
+-- depth: integer, 默认 NULL
+-- probability: integer 0-100, 默认 100
 
 behavioral_changes (id, agent_id, observation, adaptation,
                     confidence, created_at)
@@ -631,5 +745,6 @@ CREATE INDEX idx_world_keywords ON world_entries(keywords);
 
 ---
 
+*v2.1 — 双模式架构：一套引擎栈 + 两种编译模式（经典 ST 兼容 / 增强 Metroid 原生）*
 *v2.0 — 整合阿凛、Lain、Lumi、阿澪四位 Agent 的评审反馈*
 *设计者：ennec + 四位 Agent 协作*

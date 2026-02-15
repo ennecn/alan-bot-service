@@ -80,6 +80,18 @@ export class MemoryEngine implements Engine {
     return []; // graceful degradation: just skip memories
   }
 
+  /** Get recent memories across all types (for CLI) */
+  getRecentMemories(agentId: string, limit = 10): Memory[] {
+    const types = ['episodic', 'semantic', 'stm', 'working', 'procedural'] as const;
+    const all: Memory[] = [];
+    for (const type of types) {
+      all.push(...this.store.getRecent(agentId, type, limit));
+    }
+    return all
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit);
+  }
+
   /**
    * Format a retrieved memory for prompt injection.
    * Confidence level affects wording (from Lumi's feedback).

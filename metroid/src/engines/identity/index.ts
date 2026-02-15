@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type {
   Engine, EngineContext, PromptFragment,
-  AgentIdentity, MetroidCard, EmotionState,
+  AgentIdentity, MetroidCard, EmotionState, AgentMode,
 } from '../../types.js';
 
 /**
@@ -18,7 +18,7 @@ export class IdentityEngine implements Engine {
   }
 
   /** Register a new agent with a Metroid Card */
-  createAgent(name: string, card: MetroidCard): AgentIdentity {
+  createAgent(name: string, card: MetroidCard, mode: AgentMode = 'classic'): AgentIdentity {
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date();
 
@@ -26,15 +26,15 @@ export class IdentityEngine implements Engine {
       ?? { pleasure: 0, arousal: 0, dominance: 0 };
 
     this.db.prepare(`
-      INSERT INTO agents (id, name, card_json, emotion_state, created_at, updated_at)
-      VALUES (?, ?, ?, ?, datetime(?), datetime(?))
+      INSERT INTO agents (id, name, card_json, emotion_state, mode, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, datetime(?), datetime(?))
     `).run(
       id, name, JSON.stringify(card), JSON.stringify(emotionState),
-      now.toISOString(), now.toISOString(),
+      mode, now.toISOString(), now.toISOString(),
     );
 
     const identity: AgentIdentity = {
-      id, name, card, emotionState, createdAt: now, updatedAt: now,
+      id, name, card, emotionState, mode, createdAt: now, updatedAt: now,
     };
     this.agents.set(id, identity);
     return identity;
@@ -118,6 +118,15 @@ export class IdentityEngine implements Engine {
     }];
   }
 
+  /** Update agent mode */
+  setMode(agentId: string, mode: AgentMode): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.mode = mode;
+    this.db.prepare('UPDATE agents SET mode = ?, updated_at = datetime(?) WHERE id = ?')
+      .run(mode, new Date().toISOString(), agentId);
+  }
+
   private loadAgents(): void {
     const rows = this.db.prepare('SELECT * FROM agents').all() as any[];
     for (const row of rows) {
@@ -126,6 +135,7 @@ export class IdentityEngine implements Engine {
         name: row.name,
         card: JSON.parse(row.card_json),
         emotionState: JSON.parse(row.emotion_state),
+        mode: row.mode || 'classic',
         createdAt: new Date(row.created_at),
         updatedAt: new Date(row.updated_at),
       });

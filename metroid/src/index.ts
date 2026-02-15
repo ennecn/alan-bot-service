@@ -3,8 +3,11 @@ import { getDb, closeDb } from './db/index.js';
 import { AuditLog } from './security/audit.js';
 import { MemoryEngine } from './engines/memory/index.js';
 import { IdentityEngine } from './engines/identity/index.js';
+import { WorldEngine } from './engines/world/index.js';
+import { EmotionEngine } from './engines/emotion/index.js';
+import { GrowthEngine } from './engines/growth/index.js';
 import { PromptCompiler } from './compiler/index.js';
-import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext } from './types.js';
+import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
 
 export class Metroid {
@@ -12,6 +15,9 @@ export class Metroid {
   private audit: AuditLog;
   private memory: MemoryEngine;
   private identity: IdentityEngine;
+  private world: WorldEngine;
+  private emotion: EmotionEngine;
+  private growth: GrowthEngine;
   private compiler: PromptCompiler;
   private client: Anthropic;
   private config: MetroidConfig;
@@ -22,9 +28,15 @@ export class Metroid {
     this.audit = new AuditLog(this.db);
     this.memory = new MemoryEngine(this.db, this.audit, this.config);
     this.identity = new IdentityEngine(this.db);
+    this.world = new WorldEngine(this.db);
+    this.emotion = new EmotionEngine(this.db, this.identity, this.audit, this.config);
+    this.growth = new GrowthEngine(this.db, this.identity, this.audit, this.config);
     this.compiler = new PromptCompiler(this.config);
     this.compiler.registerEngine(this.identity);
+    this.compiler.registerEngine(this.emotion);
+    this.compiler.registerEngine(this.world);
     this.compiler.registerEngine(this.memory);
+    this.compiler.registerEngine(this.growth);
 
     this.client = new Anthropic({
       apiKey: this.config.llm.apiKey,
@@ -33,8 +45,8 @@ export class Metroid {
   }
 
   /** Create a new agent from a Metroid Card */
-  createAgent(name: string, card: MetroidCard): AgentIdentity {
-    return this.identity.createAgent(name, card);
+  createAgent(name: string, card: MetroidCard, mode: AgentMode = 'classic'): AgentIdentity {
+    return this.identity.createAgent(name, card, mode);
   }
 
   /** Get an existing agent */
@@ -54,14 +66,43 @@ export class Metroid {
     console.log(`[Metroid] Agent ${agent?.name ?? agentId} started`);
   }
 
+  /** Switch agent mode */
+  setAgentMode(agentId: string, mode: AgentMode): void {
+    this.identity.setMode(agentId, mode);
+  }
+
+  /** Get current emotion state */
+  getEmotionState(agentId: string): EmotionState | undefined {
+    return this.emotion.getState(agentId);
+  }
+
+  /** Get recent memories across all types */
+  getRecentMemories(agentId: string, limit = 10): Memory[] {
+    return this.memory.getRecentMemories(agentId, limit);
+  }
+
+  /** Get active behavioral changes */
+  getActiveGrowthChanges(agentId: string): BehavioralChange[] {
+    return this.growth.getActiveChanges(agentId);
+  }
+
+  /** Search world entries by keyword */
+  searchWorldEntries(keyword: string) {
+    return this.world.search(keyword);
+  }
+
   /** Process an incoming message and generate a response */
   async chat(
     agentId: string,
     message: MetroidMessage,
     history: MetroidMessage[] = [],
   ): Promise<string> {
+    const agent = this.identity.getAgent(agentId);
+    const mode = agent?.mode ?? 'classic';
+
     const context: EngineContext = {
       agentId,
+      mode,
       message,
       conversationHistory: history,
     };
@@ -121,7 +162,8 @@ export class Metroid {
 export type { MetroidConfig } from './config.js';
 export type {
   Memory, MemoryQuery, MemoryScore,
-  EmotionState, AgentIdentity, MetroidCard,
+  EmotionState, EmotionUpdate, BehavioralChange,
+  AgentIdentity, MetroidCard, AgentMode,
   MetroidMessage, PromptFragment, AuditEntry,
   Engine, EngineContext,
 } from './types.js';
