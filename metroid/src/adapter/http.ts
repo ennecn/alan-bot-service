@@ -23,12 +23,19 @@
  *     -d '{"content":"Hello!","userId":"user-1","userName":"用户"}'
  */
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { readFileSync, mkdirSync, appendFileSync, readdirSync, existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 import { Metroid } from '../index.js';
 import type { MetroidMessage, AgentMode } from '../types.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '8100');
 const DATA_DIR = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
+const LOG_DIR = resolve(DATA_DIR, 'logs');
+
+// Ensure log directory exists
+mkdirSync(LOG_DIR, { recursive: true });
 
 // === JSON helpers ===
 
@@ -115,6 +122,15 @@ function init() {
   }
 }
 
+// === Conversation Logging ===
+
+function logConversation(agentId: string, agentName: string, entry: any) {
+  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const logFile = resolve(LOG_DIR, `${agentName}-${date}.jsonl`);
+  const line = JSON.stringify({ ...entry, timestamp: new Date().toISOString() });
+  appendFileSync(logFile, line + '\n');
+}
+
 // === Routes ===
 
 route('GET', '/health', (_req, res) => {
@@ -193,6 +209,16 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
     const response = await metroid.chat(id, userMsg, history);
     const emotion = metroid.getEmotionState(id);
     const growthCount = metroid.getActiveGrowthChanges(id).length;
+    const growthChanges = metroid.getActiveGrowthChanges(id);
+
+    // Log conversation
+    logConversation(id, agent.name, {
+      agentId: id, agentName: agent.name, mode: agent.mode,
+      user: { id: body.userId, name: body.userName, content: body.content },
+      response,
+      emotion,
+      growthChanges: growthChanges.map(c => ({ adaptation: c.adaptation, confidence: c.confidence })),
+    });
 
     json(res, {
       response,
@@ -262,8 +288,35 @@ route('POST', '/import/world', async (req, res) => {
 
 init();
 
+// Serve web UI and logs
+function serveStatic(res: ServerResponse, filePath: string, contentType: string) {
+  try {
+    const content = readFileSync(filePath, 'utf-8');
+    res.writeHead(200, { 'Content-Type': contentType });
+    res.end(content);
+  } catch {
+    error(res, 'not found', 404);
+  }
+}
+
+// Log listing route
+route('GET', '/logs', (_req, res) => {
+  if (!existsSync(LOG_DIR)) { json(res, { files: [] }); return; }
+  const files = readdirSync(LOG_DIR).filter(f => f.endsWith('.jsonl')).sort().reverse();
+  json(res, { files, dir: LOG_DIR });
+});
+
+route('GET', '/logs/:filename', (_req, res, { filename }) => {
+  const filePath = resolve(LOG_DIR, filename);
+  if (!existsSync(filePath) || !filename.endsWith('.jsonl')) return error(res, 'not found', 404);
+  const lines = readFileSync(filePath, 'utf-8').trim().split('\n').filter(Boolean);
+  const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  json(res, { entries });
+});
+
 const server = createServer(async (req, res) => {
-  const url = (req.url || '/').split('?')[0];
+  const rawUrl = req.url || '/';
+  const url = rawUrl.split('?')[0];
   const method = req.method || 'GET';
 
   // CORS
@@ -271,6 +324,12 @@ const server = createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // Serve web UI at root
+  if (method === 'GET' && (url === '/' || url === '/index.html')) {
+    serveStatic(res, resolve(__dirname, '../../public/index.html'), 'text/html; charset=utf-8');
+    return;
+  }
 
   const matched = matchRoute(method, url);
   if (matched) {

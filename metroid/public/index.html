@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Metroid Test Panel</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
+
+/* Header */
+.header { background: #161b22; border-bottom: 1px solid #30363d; padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.header h1 { font-size: 16px; color: #58a6ff; font-weight: 600; }
+.header select, .header button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
+.header button:hover { background: #30363d; }
+.header .mode-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.mode-classic { background: #1f6feb33; color: #58a6ff; }
+.mode-enhanced { background: #23863633; color: #3fb950; }
+
+/* Main layout */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* Chat panel */
+.chat-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #30363d; }
+.messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.msg-user { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 4px; }
+.msg-bot { align-self: flex-start; background: #21262d; border: 1px solid #30363d; border-bottom-left-radius: 4px; }
+.msg-system { align-self: center; color: #8b949e; font-size: 12px; font-style: italic; }
+.msg-time { font-size: 11px; color: #8b949e; margin-top: 4px; }
+
+/* Input */
+.input-bar { display: flex; gap: 8px; padding: 12px 16px; background: #161b22; border-top: 1px solid #30363d; flex-shrink: 0; }
+.input-bar input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; font-size: 14px; outline: none; }
+.input-bar input:focus { border-color: #58a6ff; }
+.input-bar button { background: #238636; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600; }
+.input-bar button:hover { background: #2ea043; }
+.input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Side panel */
+.side-panel { width: 320px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; }
+.panel-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; }
+.panel-section h3 { font-size: 13px; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* PAD bars */
+.pad-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+.pad-label { width: 24px; font-weight: 600; }
+.pad-bar { flex: 1; height: 8px; background: #21262d; border-radius: 4px; position: relative; overflow: hidden; }
+.pad-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+.pad-value { width: 44px; text-align: right; font-size: 12px; color: #8b949e; }
+.pad-tag { font-size: 11px; color: #8b949e; width: 48px; }
+
+/* Growth items */
+.growth-item { font-size: 13px; padding: 6px 0; border-bottom: 1px solid #21262d; }
+.growth-item:last-child { border-bottom: none; }
+.growth-conf { color: #8b949e; font-size: 11px; }
+
+/* Memory items */
+.memory-item { font-size: 12px; padding: 4px 0; border-bottom: 1px solid #21262d; color: #8b949e; }
+.memory-type { display: inline-block; background: #21262d; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-right: 4px; }
+
+/* Quick test */
+.quick-tests { display: flex; flex-wrap: wrap; gap: 4px; }
+.quick-tests button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+.quick-tests button:hover { background: #30363d; }
+
+/* Responsive */
+@media (max-width: 768px) { .side-panel { display: none; } }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>Metroid Test Panel</h1>
+  <select id="agentSelect"></select>
+  <span id="modeBadge" class="mode-badge"></span>
+  <button onclick="toggleMode()">切换模式</button>
+  <button onclick="runQuickTests()">跑对比测试</button>
+  <span id="statusText" style="margin-left:auto;font-size:12px;color:#8b949e"></span>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <!-- Chat -->
+  <div class="chat-panel">
+    <div class="messages" id="messages"></div>
+    <div class="input-bar">
+      <input id="chatInput" placeholder="输入消息..." autocomplete="off">
+      <button id="sendBtn" onclick="sendMessage()">发送</button>
+    </div>
+  </div>
+
+  <!-- Side panel -->
+  <div class="side-panel">
+    <!-- Emotion -->
+    <div class="panel-section">
+      <h3>情绪状态 (PAD)</h3>
+      <div id="emotionPanel">
+        <div class="pad-row"><span class="pad-label">P</span><div class="pad-bar"><div class="pad-fill" id="padP" style="width:50%;background:#3fb950"></div></div><span class="pad-value" id="padPVal">0.00</span><span class="pad-tag" id="padPTag">中性</span></div>
+        <div class="pad-row"><span class="pad-label">A</span><div class="pad-bar"><div class="pad-fill" id="padA" style="width:50%;background:#f0883e"></div></div><span class="pad-value" id="padAVal">0.00</span><span class="pad-tag" id="padATag">中性</span></div>
+        <div class="pad-row"><span class="pad-label">D</span><div class="pad-bar"><div class="pad-fill" id="padD" style="width:50%;background:#a371f7"></div></div><span class="pad-value" id="padDVal">0.00</span><span class="pad-tag" id="padDTag">中性</span></div>
+      </div>
+    </div>
+
+    <!-- Growth -->
+    <div class="panel-section">
+      <h3>行为成长</h3>
+      <div id="growthPanel"><span style="color:#8b949e;font-size:13px">暂无变化</span></div>
+    </div>
+
+    <!-- Memories -->
+    <div class="panel-section">
+      <h3>最近记忆</h3>
+      <div id="memoryPanel"><span style="color:#8b949e;font-size:13px">暂无记忆</span></div>
+    </div>
+
+    <!-- Quick tests -->
+    <div class="panel-section">
+      <h3>快速测试</h3>
+      <div class="quick-tests">
+        <button onclick="quickSend('Hi! I just moved to this neighborhood.')">初次见面</button>
+        <button onclick="quickSend('Do you know anything about Mondstadt?')">Mondstadt</button>
+        <button onclick="quickSend(`There\\'s a character called Venti who\\'s a god disguised as a bard.`)">Venti</button>
+        <button onclick="quickSend('What made you want to become a pediatrician?')">个人话题</button>
+        <button onclick="quickSend('I was nervous about talking to you. You seem so kind.')">情感互动</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentAgent = null;
+let chatHistory = [];
+
+// === Init ===
+async function init() {
+  await loadAgents();
+  setInterval(refreshSidePanel, 5000);
+}
+
+async function loadAgents() {
+  const res = await fetch(`${API}/agents`);
+  const { agents } = await res.json();
+  const sel = document.getElementById('agentSelect');
+  sel.innerHTML = agents.map(a =>
+    `<option value="${a.id}">${a.name} [${a.mode}]</option>`
+  ).join('');
+  if (agents.length > 0) {
+    currentAgent = agents[0];
+    sel.value = agents[0].id;
+    updateModeBadge(agents[0].mode);
+    refreshSidePanel();
+  }
+  sel.onchange = () => {
+    currentAgent = agents.find(a => a.id === sel.value);
+    chatHistory = [];
+    document.getElementById('messages').innerHTML = '';
+    updateModeBadge(currentAgent.mode);
+    refreshSidePanel();
+    addSystemMsg(`已切换到 ${currentAgent.name}`);
+  };
+}
+
+// === Chat ===
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const content = input.value.trim();
+  if (!content || !currentAgent) return;
+
+  input.value = '';
+  addMsg(content, 'user');
+
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+  btn.textContent = '...';
+
+  try {
+    const res = await fetch(`${API}/agents/${currentAgent.id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        userId: 'test-user',
+        userName: '测试员',
+        history: chatHistory.slice(-20),
+      }),
+    });
+    const data = await res.json();
+    if (data.error) { addSystemMsg(`错误: ${data.error}`); return; }
+
+    chatHistory.push({ content, isBot: false });
+    chatHistory.push({ content: data.response, isBot: true });
+
+    addMsg(data.response, 'bot');
+    if (data.emotion) updateEmotion(data.emotion);
+    updateStatus(`${data.mode} | 成长:${data.growthChanges}`);
+    refreshSidePanel();
+  } catch (err) {
+    addSystemMsg(`请求失败: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '发送';
+  }
+}
+
+function quickSend(text) {
+  document.getElementById('chatInput').value = text;
+  sendMessage();
+}
+
+async function runQuickTests() {
+  const tests = [
+    'Hi Rachel, I just moved to this neighborhood. Someone told me you teach theology to kids at the church?',
+    "By the way, I've been playing Genshin Impact lately. Do you know anything about Mondstadt?",
+    "There's this character called Venti who's actually a god disguised as a bard. Kind of reminds me of angels in disguise, don't you think?",
+    'What made you want to become a pediatrician? Was it something from your childhood?',
+    'I have to admit, I was nervous about talking to you. You seem so kind and genuine.',
+  ];
+  addSystemMsg('开始对比测试 (5 轮)...');
+  for (let i = 0; i < tests.length; i++) {
+    addSystemMsg(`--- Test ${i + 1}/5 ---`);
+    document.getElementById('chatInput').value = tests[i];
+    await sendMessage();
+    await new Promise(r => setTimeout(r, 500));
+  }
+  addSystemMsg('对比测试完成！日志已保存。');
+}
+
+// === Mode ===
+async function toggleMode() {
+  if (!currentAgent) return;
+  const newMode = currentAgent.mode === 'classic' ? 'enhanced' : 'classic';
+  await fetch(`${API}/agents/${currentAgent.id}/mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: newMode }),
+  });
+  currentAgent.mode = newMode;
+  updateModeBadge(newMode);
+  addSystemMsg(`模式已切换为 ${newMode}`);
+  refreshSidePanel();
+}
+
+function updateModeBadge(mode) {
+  const badge = document.getElementById('modeBadge');
+  badge.textContent = mode;
+  badge.className = `mode-badge mode-${mode}`;
+}
+
+// === Side panel ===
+async function refreshSidePanel() {
+  if (!currentAgent) return;
+  try {
+    const [emotionRes, growthRes, memoryRes] = await Promise.all([
+      fetch(`${API}/agents/${currentAgent.id}/emotion`),
+      fetch(`${API}/agents/${currentAgent.id}/growth`),
+      fetch(`${API}/agents/${currentAgent.id}/memories?limit=8`),
+    ]);
+    const emotion = await emotionRes.json();
+    const growth = await growthRes.json();
+    const memory = await memoryRes.json();
+
+    if (emotion.emotion) updateEmotion(emotion.emotion);
+    updateGrowth(growth.changes || []);
+    updateMemories(memory.memories || []);
+  } catch {}
+}
+
+function updateEmotion(e) {
+  setPad('P', e.pleasure, '#3fb950');
+  setPad('A', e.arousal, '#f0883e');
+  setPad('D', e.dominance, '#a371f7');
+}
+
+function setPad(axis, value, color) {
+  const pct = ((value + 1) / 2) * 100;
+  document.getElementById(`pad${axis}`).style.width = pct + '%';
+  document.getElementById(`pad${axis}`).style.background = color;
+  document.getElementById(`pad${axis}Val`).textContent = (value >= 0 ? '+' : '') + value.toFixed(2);
+  const labels = {
+    P: v => v > 0.5 ? '愉快' : v > 0 ? '偏愉快' : v > -0.5 ? '偏低落' : '低落',
+    A: v => v > 0.5 ? '兴奋' : v > 0 ? '偏活跃' : v > -0.5 ? '偏平静' : '低沉',
+    D: v => v > 0.5 ? '自信' : v > 0 ? '偏自信' : v > -0.5 ? '偏谦逊' : '顺从',
+  };
+  document.getElementById(`pad${axis}Tag`).textContent = labels[axis](value);
+}
+
+function updateGrowth(changes) {
+  const el = document.getElementById('growthPanel');
+  if (changes.length === 0) { el.innerHTML = '<span style="color:#8b949e;font-size:13px">暂无变化</span>'; return; }
+  el.innerHTML = changes.map(c =>
+    `<div class="growth-item">${c.adaptation} <span class="growth-conf">${Math.round(c.confidence * 100)}%</span></div>`
+  ).join('');
+}
+
+function updateMemories(memories) {
+  const el = document.getElementById('memoryPanel');
+  if (memories.length === 0) { el.innerHTML = '<span style="color:#8b949e;font-size:13px">暂无记忆</span>'; return; }
+  el.innerHTML = memories.map(m =>
+    `<div class="memory-item"><span class="memory-type">${m.type}</span>${m.content.slice(0, 80)}</div>`
+  ).join('');
+}
+
+// === UI helpers ===
+function addMsg(text, type) {
+  const el = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = `msg msg-${type}`;
+  div.textContent = text;
+  const time = document.createElement('div');
+  time.className = 'msg-time';
+  time.textContent = new Date().toLocaleTimeString();
+  div.appendChild(time);
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function addSystemMsg(text) {
+  const el = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg msg-system';
+  div.textContent = text;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateStatus(text) {
+  document.getElementById('statusText').textContent = text;
+}
+
+// Enter to send
+document.getElementById('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+init();
+</script>
+</body>
+</html>
