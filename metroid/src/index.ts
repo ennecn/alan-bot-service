@@ -7,6 +7,10 @@ import { WorldEngine } from './engines/world/index.js';
 import { EmotionEngine } from './engines/emotion/index.js';
 import { GrowthEngine } from './engines/growth/index.js';
 import { ProactiveEngine } from './engines/proactive/index.js';
+import { SocialEngine } from './engines/social/index.js';
+import { SessionEngine } from './engines/session/index.js';
+import { FeedEngine } from './engines/feed/index.js';
+import { ConversationEngine } from './engines/conversation/index.js';
 import { PromptCompiler } from './compiler/index.js';
 import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -16,6 +20,7 @@ export interface ChatResult {
   timing: { totalMs: number; llmMs: number; compileMs: number; postProcessMs: number };
   tokenUsage: { promptTokens: number; completionTokens: number };
   fragmentSummary: Array<{ source: string; tokens: number }>;
+  sessionId?: string;
 }
 
 export class Metroid {
@@ -27,9 +32,15 @@ export class Metroid {
   private emotion: EmotionEngine;
   private growth: GrowthEngine;
   private proactive: ProactiveEngine;
+  private social: SocialEngine;
+  private sessions: SessionEngine;
+  private feed: FeedEngine;
+  private conversations: ConversationEngine;
   private compiler: PromptCompiler;
   private client: Anthropic;
   private config: MetroidConfig;
+  /** Per-agent mutex to serialize concurrent chat requests */
+  private chatLocks = new Map<string, Promise<void>>();
 
   constructor(config: Partial<MetroidConfig> = {}) {
     this.config = { ...defaultConfig, ...config };
@@ -41,12 +52,17 @@ export class Metroid {
     this.emotion = new EmotionEngine(this.db, this.identity, this.audit, this.config);
     this.growth = new GrowthEngine(this.db, this.identity, this.audit, this.config);
     this.proactive = new ProactiveEngine(this.db, this.identity, this.emotion, this.audit, this.config);
+    this.social = new SocialEngine(this.db, this.identity);
+    this.sessions = new SessionEngine(this.db);
+    this.feed = new FeedEngine(this.db);
+    this.conversations = new ConversationEngine(this.db);
     this.compiler = new PromptCompiler(this.config);
     this.compiler.registerEngine(this.identity);
     this.compiler.registerEngine(this.emotion);
     this.compiler.registerEngine(this.world);
     this.compiler.registerEngine(this.memory);
     this.compiler.registerEngine(this.growth);
+    this.compiler.registerEngine(this.social);
     this.compiler.registerEngine(this.proactive);
 
     // Wire up proactive message generation via LLM
@@ -83,9 +99,24 @@ export class Metroid {
     console.log(`[Metroid] Agent ${agent?.name ?? agentId} started`);
   }
 
-  /** Switch agent mode */
-  setAgentMode(agentId: string, mode: AgentMode): void {
+  /** Switch agent mode with optional transition ritual */
+  setAgentMode(agentId: string, mode: AgentMode): string | undefined {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) return undefined;
+    const oldMode = agent.mode;
+    if (oldMode === mode) return undefined;
+
     this.identity.setMode(agentId, mode);
+
+    // Mode switching ritual text
+    const card = agent.card;
+    if (mode === 'enhanced' && oldMode === 'classic') {
+      return card.modeTransition?.toEnhanced ?? 'Something awakened in me... I can feel more now.';
+    }
+    if (mode === 'classic' && oldMode === 'enhanced') {
+      return card.modeTransition?.toClassic ?? 'The world feels simpler again...';
+    }
+    return undefined;
   }
 
   /** Get current emotion state */
@@ -113,6 +144,30 @@ export class Metroid {
     agentId: string,
     message: MetroidMessage,
     history: MetroidMessage[] = [],
+    sessionId?: string,
+  ): Promise<ChatResult> {
+    // Serialize concurrent requests for the same agent
+    const prev = this.chatLocks.get(agentId) ?? Promise.resolve();
+    let resolve: () => void;
+    const lock = new Promise<void>(r => { resolve = r; });
+    this.chatLocks.set(agentId, lock);
+    await prev;
+
+    try {
+      return await this.chatInternal(agentId, message, history, sessionId);
+    } finally {
+      resolve!();
+      if (this.chatLocks.get(agentId) === lock) {
+        this.chatLocks.delete(agentId);
+      }
+    }
+  }
+
+  private async chatInternal(
+    agentId: string,
+    message: MetroidMessage,
+    history: MetroidMessage[],
+    sessionId?: string,
   ): Promise<ChatResult> {
     const t0 = performance.now();
     const agent = this.identity.getAgent(agentId);
@@ -124,6 +179,7 @@ export class Metroid {
       message,
       conversationHistory: history,
       userName: message.author.name,
+      userId: message.author.id,
     };
 
     // Compile prompt — identity + memory + other engines contribute fragments
@@ -167,6 +223,12 @@ export class Metroid {
     }
     const fragmentSummary = [...fragMap.entries()].map(([source, tokens]) => ({ source, tokens }));
 
+    // Record messages in session if active (P5-7)
+    if (sessionId) {
+      this.sessions.addMessage(sessionId, 'user', message.content, message.author.name);
+      this.sessions.addMessage(sessionId, 'assistant', responseText);
+    }
+
     return {
       response: responseText,
       timing: {
@@ -180,6 +242,7 @@ export class Metroid {
         completionTokens: Math.ceil(responseText.length / 3),
       },
       fragmentSummary,
+      sessionId,
     };
   }
 
@@ -485,17 +548,158 @@ export class Metroid {
     console.log(`[Metroid] LLM config updated:`, updates);
   }
 
-  /** Set rpMode for an agent at runtime */
+  /** Set rpMode for an agent at runtime (persisted to DB) */
   setRpMode(agentId: string, rpMode: RpMode): void {
     const agent = this.identity.getAgent(agentId);
     if (!agent) return;
     agent.card.rpMode = rpMode;
+    this.identity.persistCard(agentId, agent);
     console.log(`[Metroid] Agent ${agent.name} rpMode set to ${rpMode}`);
   }
 
   /** Get all growth changes including reverted ones */
   getAllGrowthChanges(agentId: string, limit = 50): BehavioralChange[] {
     return this.growth.getAllChanges(agentId, limit);
+  }
+
+  /** Get relationships for an agent */
+  getRelationships(agentId: string) {
+    return this.social.getRelationships(agentId);
+  }
+
+  /** Set a relationship between two agents */
+  setRelationship(agentA: string, agentB: string, type: string, affinity: number, notes?: string) {
+    return this.social.setRelationship(agentA, agentB, type as any, affinity, notes);
+  }
+
+  // === Session API (P5-7) ===
+
+  /** Start a new conversation session, returns previous context for continuity */
+  startSession(agentId: string, userId?: string) {
+    return this.sessions.startSession(agentId, userId);
+  }
+
+  /** End a session with optional summary */
+  endSession(sessionId: string, summary?: string): void {
+    this.sessions.endSession(sessionId, summary);
+  }
+
+  /** Get session messages */
+  getSessionMessages(sessionId: string, limit = 100) {
+    return this.sessions.getMessages(sessionId, limit);
+  }
+
+  /** List sessions for an agent */
+  listSessions(agentId: string, limit = 20) {
+    return this.sessions.listSessions(agentId, limit);
+  }
+
+  // === Feed API (P5-2) ===
+
+  /** Get agent's feed entries */
+  getFeed(agentId: string, limit = 20) {
+    return this.feed.getFeed(agentId, limit);
+  }
+
+  /** Generate feed entries from current agent state */
+  generateFeed(agentId: string) {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) return [];
+    return this.feed.generateFromState(agentId, {
+      emotion: this.emotion.getState(agentId),
+      recentMemories: this.memory.getRecentMemories(agentId, 5),
+      growthChanges: this.growth.getActiveChanges(agentId),
+      agentName: agent.name,
+    });
+  }
+
+  // === Conversation API (P5-1) ===
+
+  /** Create a multi-agent conversation */
+  createConversation(title: string | undefined, createdBy: string, agentIds: string[]) {
+    return this.conversations.create(title, createdBy, agentIds);
+  }
+
+  /** Get a conversation */
+  getConversation(conversationId: string) {
+    return this.conversations.get(conversationId);
+  }
+
+  /** List conversations */
+  listConversations(limit = 20) {
+    return this.conversations.list(limit);
+  }
+
+  /** Get conversation messages */
+  getConversationMessages(conversationId: string, limit = 100) {
+    return this.conversations.getMessages(conversationId, limit);
+  }
+
+  /** Send a user message to a conversation and get the next agent's response */
+  async conversationChat(
+    conversationId: string,
+    content: string,
+    userId: string,
+    userName: string,
+  ): Promise<{ agentId: string; agentName: string; response: string; timing: ChatResult['timing'] } | null> {
+    const conv = this.conversations.get(conversationId);
+    if (!conv) return null;
+
+    // Record user message
+    this.conversations.addMessage(conversationId, {
+      userId, role: 'user', content, authorName: userName,
+    });
+
+    // Select which agent responds
+    const agentNames = new Map<string, string>();
+    for (const aid of conv.participants) {
+      const a = this.identity.getAgent(aid);
+      if (a) agentNames.set(aid, a.name);
+    }
+    const nextSpeaker = this.conversations.selectNextSpeaker(
+      conversationId, conv.participants, content, agentNames,
+    );
+    if (!nextSpeaker) return null;
+
+    const agent = this.identity.getAgent(nextSpeaker);
+    if (!agent) return null;
+
+    // Build history from conversation messages
+    const recentMsgs = this.conversations.getRecentMessages(conversationId, 20);
+    const history: MetroidMessage[] = recentMsgs.slice(0, -1).map((m, i) => ({
+      id: `conv-${conversationId}-${i}`,
+      channel: 'web-im' as const,
+      author: {
+        id: m.agentId || m.userId || 'unknown',
+        name: m.authorName || (m.agentId ? agentNames.get(m.agentId) || 'Agent' : 'User'),
+        isBot: m.role === 'assistant',
+      },
+      content: m.content,
+      timestamp: m.createdAt.getTime(),
+    }));
+
+    const userMsg: MetroidMessage = {
+      id: `conv-${conversationId}-msg-${Date.now()}`,
+      channel: 'web-im',
+      author: { id: userId, name: userName, isBot: false },
+      content,
+      timestamp: Date.now(),
+    };
+
+    const result = await this.chat(nextSpeaker, userMsg, history);
+
+    // Record agent response
+    this.conversations.addMessage(conversationId, {
+      agentId: nextSpeaker, role: 'assistant', content: result.response,
+      authorName: agent.name,
+    });
+
+    return {
+      agentId: nextSpeaker,
+      agentName: agent.name,
+      response: result.response,
+      timing: result.timing,
+    };
   }
 
   /** Graceful shutdown */

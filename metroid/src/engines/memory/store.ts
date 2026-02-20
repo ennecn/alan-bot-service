@@ -15,8 +15,8 @@ export class MemoryStore {
       insert: this.db.prepare(`
         INSERT INTO memories (id, agent_id, type, content, summary, importance,
           confidence, privacy, emotion_context, keywords, source_message_id,
-          recall_count, created_at, last_recalled_at, faded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(?), ?, ?)
+          user_id, recall_count, created_at, last_recalled_at, faded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(?), ?, ?)
       `),
 
       getById: this.db.prepare(`SELECT * FROM memories WHERE id = ?`),
@@ -82,6 +82,10 @@ export class MemoryStore {
         WHERE agent_id = ? AND source_message_id = ?
         LIMIT 1
       `),
+
+      updateConfidence: this.db.prepare(
+        `UPDATE memories SET confidence = ? WHERE id = ?`
+      ),
     };
   }
 
@@ -93,6 +97,7 @@ export class MemoryStore {
       memory.summary ?? null, memory.importance, memory.confidence,
       memory.privacy, memory.emotionContext ? JSON.stringify(memory.emotionContext) : null,
       memory.keywords.join(','), memory.sourceMessageId ?? null,
+      memory.userId ?? null,
       0, now.toISOString(), null, null,
     );
     return { ...memory, id, recallCount: 0, createdAt: now };
@@ -155,6 +160,10 @@ export class MemoryStore {
     return row ? this.rowToMemory(row) : null;
   }
 
+  updateConfidence(id: string, confidence: number): void {
+    this.stmts.updateConfidence.run(confidence, id);
+  }
+
   private rowToMemory(row: any): Memory {
     return {
       id: row.id,
@@ -168,6 +177,7 @@ export class MemoryStore {
       emotionContext: row.emotion_context ? JSON.parse(row.emotion_context) : undefined,
       keywords: row.keywords ? row.keywords.split(',') : [],
       sourceMessageId: row.source_message_id ?? undefined,
+      userId: row.user_id ?? undefined,
       recallCount: row.recall_count,
       createdAt: new Date(row.created_at),
       lastRecalledAt: row.last_recalled_at ? new Date(row.last_recalled_at) : undefined,

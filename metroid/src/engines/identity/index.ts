@@ -105,6 +105,24 @@ export class IdentityEngine implements Engine {
       });
     }
 
+    // P5-4: Self-awareness — instruct agent to express uncertainty naturally
+    if (context.mode === 'enhanced') {
+      const awarenessText = [
+        '<self_awareness>',
+        '当你对某件事记忆模糊时，自然地表达不确定性（如"我不太确定..."、"让我想想..."）。',
+        '不要假装知道你不记得的事情。承认记忆的局限性会让你更真实。',
+        '</self_awareness>',
+      ].join('\n');
+
+      fragments.push({
+        source: 'identity',
+        content: awarenessText,
+        priority: 50,
+        tokens: Math.ceil(awarenessText.length / 3),
+        required: false,
+      });
+    }
+
     return fragments;
   }
 
@@ -125,6 +143,37 @@ export class IdentityEngine implements Engine {
     agent.mode = mode;
     this.db.prepare('UPDATE agents SET mode = ?, updated_at = datetime(?) WHERE id = ?')
       .run(mode, new Date().toISOString(), agentId);
+  }
+
+  /** Update a mutable trait's intensity. Creates the trait if it doesn't exist. */
+  updateTrait(agentId: string, trait: string, delta: number): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+
+    if (!agent.card.soul) {
+      agent.card.soul = { immutableValues: [], mutableTraits: [] };
+    }
+    if (!agent.card.soul.mutableTraits) {
+      agent.card.soul.mutableTraits = [];
+    }
+
+    const existing = agent.card.soul.mutableTraits.find(t => t.trait === trait);
+    if (existing) {
+      existing.intensity = Math.max(0, Math.min(1, existing.intensity + delta));
+    } else {
+      agent.card.soul.mutableTraits.push({
+        trait,
+        intensity: Math.max(0, Math.min(1, 0.5 + delta)),
+      });
+    }
+
+    this.persistCard(agentId, agent);
+  }
+
+  /** Persist the card JSON to DB */
+  persistCard(agentId: string, agent: AgentIdentity): void {
+    this.db.prepare('UPDATE agents SET card_json = ?, updated_at = datetime(?) WHERE id = ?')
+      .run(JSON.stringify(agent.card), new Date().toISOString(), agentId);
   }
 
   private loadAgents(): void {

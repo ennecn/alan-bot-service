@@ -6,7 +6,6 @@ export interface MetroidConfig {
 
   // Memory settings
   memory: {
-    encodingSampleRate: number;   // deprecated: all messages are now stored
     importanceThreshold: number;  // min importance to promote STM→LTM
     fadeThreshold: number;        // below this = faded
     maxRetrievalResults: number;
@@ -67,7 +66,6 @@ export const defaultConfig: MetroidConfig = {
   dbPath: resolve(dataDir, 'metroid.db'),
 
   memory: {
-    encodingSampleRate: 0.3,
     importanceThreshold: 0.4,
     fadeThreshold: 0.3,
     maxRetrievalResults: 5,

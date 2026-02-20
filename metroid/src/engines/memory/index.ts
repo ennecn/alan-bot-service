@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import type {
   Engine, EngineContext, PromptFragment,
-  MemoryScore, Memory,
+  MemoryScore, Memory, PrivacyLevel,
 } from '../../types.js';
 import type { MetroidConfig } from '../../config.js';
 import type { AuditLog } from '../../security/audit.js';
@@ -11,6 +11,8 @@ import { MemoryEncoder } from './encoder.js';
 import { MemoryForgetter } from './forgetter.js';
 import { EmbeddingService } from './embedding.js';
 import { GraphRAG } from './graph-rag.js';
+import { SessionCache } from './session-cache.js';
+import { ConflictArbiter } from './conflict.js';
 
 export class MemoryEngine implements Engine {
   readonly name = 'memory';
@@ -21,6 +23,8 @@ export class MemoryEngine implements Engine {
   private forgetter: MemoryForgetter;
   private embedding: EmbeddingService;
   private graphRag: GraphRAG;
+  private sessionCache: SessionCache;
+  private conflictArbiter: ConflictArbiter;
 
   constructor(db: Database.Database, audit: AuditLog, config: MetroidConfig) {
     this.store = new MemoryStore(db);
@@ -29,6 +33,8 @@ export class MemoryEngine implements Engine {
     this.retriever = new MemoryRetriever(this.store, this.embedding);
     this.encoder = new MemoryEncoder(this.store, audit, config);
     this.forgetter = new MemoryForgetter(this.store, audit, config);
+    this.sessionCache = new SessionCache();
+    this.conflictArbiter = new ConflictArbiter();
   }
 
   /** Start background processes (forgetting cycle) */
@@ -44,22 +50,64 @@ export class MemoryEngine implements Engine {
   async getPromptFragments(context: EngineContext): Promise<PromptFragment[]> {
     const fragments: PromptFragment[] = [];
 
-    // Standard memory retrieval (keyword + vector)
+    // Default privacy filter: exclude sensitive memories unless explicitly allowed
+    const privacyFilter: PrivacyLevel[] = context.privacyLevel === 'sensitive'
+      ? ['public', 'private', 'sensitive']
+      : ['public', 'private'];
+
+    // Standard memory retrieval (keyword + vector) — L2 on-demand
     const results = await this.retriever.retrieve({
       agentId: context.agentId,
       text: context.message.content,
+      privacyFilter,
+      userId: context.userId,
     });
 
-    if (results.length > 0) {
-      const memoryText = results
+    // L1 session cache: merge high-importance preloaded memories
+    const cached = this.sessionCache.get(context.agentId, this.store, context.userId);
+    const l2Ids = new Set(results.map(r => r.memory.id));
+    const l1Only = cached.filter(m => !l2Ids.has(m.id));
+    // Add L1 memories as low-priority scored entries (they're context, not query-matched)
+    const l1Scored = l1Only.map(m => ({
+      memory: m,
+      score: m.importance * 0.5, // lower than query-matched L2
+      matchReason: 'session cache (L1)',
+    }));
+    const merged = [...results, ...l1Scored]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10); // cap total memories in prompt
+
+    // P5-3: Conflict arbitration — detect and resolve contradictory memories
+    const conflicts = this.conflictArbiter.arbitrate(merged, this.store);
+    if (conflicts.length > 0) {
+      console.log(`[MemoryEngine] Resolved ${conflicts.length} memory conflict(s)`);
+    }
+
+    if (merged.length > 0) {
+      const memoryText = merged
         .map(r => this.formatMemory(r))
         .join('\n');
 
+      // P5-4: Self-awareness — add uncertainty hint when few results
+      let awarenessHint = '';
+      if (merged.length <= 2) {
+        awarenessHint = '\n[关于这个话题，我的记忆不太多，让我想想...]';
+      }
+
       fragments.push({
         source: 'memory',
-        content: `<memories>\n${memoryText}\n</memories>`,
+        content: `<memories>\n${memoryText}${awarenessHint}\n</memories>`,
         priority: 60,
-        tokens: Math.ceil(memoryText.length / 4),
+        tokens: Math.ceil((memoryText.length + awarenessHint.length) / 4),
+        required: false,
+      });
+    } else {
+      // No memories at all — inject awareness of memory gap
+      fragments.push({
+        source: 'memory',
+        content: '<memories>\n[我对这个话题没有相关记忆]\n</memories>',
+        priority: 30,
+        tokens: 15,
         required: false,
       });
     }
@@ -114,6 +162,9 @@ export class MemoryEngine implements Engine {
     const combinedText = `${context.message.content}\n${response}`;
     this.graphRag.extractRelations(context.agentId, combinedText)
       .catch(() => {}); // swallow errors
+
+    // Invalidate L1 cache so next retrieval picks up new memories
+    this.sessionCache.invalidate(context.agentId, context.userId);
   }
 
   /** Async embedding generation — does not block conversation */
@@ -169,16 +220,16 @@ export class MemoryEngine implements Engine {
     const text = m.summary || m.content;
     const conf = m.confidence;
 
-    // Confidence-based framing
+    // Confidence-based framing (P5-4: self-awareness)
     let prefix: string;
     if (conf > 0.8) {
       prefix = '确切记得';
     } else if (conf > 0.5) {
       prefix = '记得';
     } else if (conf > 0.3) {
-      prefix = '好像记得';
+      prefix = '我不太确定，但好像记得';
     } else {
-      prefix = '隐约记得';
+      prefix = '记忆有些模糊...隐约记得';
     }
 
     const age = this.formatAge(m.createdAt);
@@ -202,3 +253,5 @@ export { MemoryEncoder } from './encoder.js';
 export { MemoryForgetter } from './forgetter.js';
 export { EmbeddingService } from './embedding.js';
 export { GraphRAG } from './graph-rag.js';
+export { SessionCache } from './session-cache.js';
+export { ConflictArbiter } from './conflict.js';

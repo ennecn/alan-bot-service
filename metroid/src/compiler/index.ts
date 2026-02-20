@@ -164,8 +164,32 @@ export class PromptCompiler {
     return [base, ...sections].join('\n\n');
   }
 
-  private estimateTokens(text: string): number {
-    return Math.ceil(text.length / 3);
+  /**
+   * Estimate token count with CJK-aware approximation.
+   * CJK characters ≈ 1.5 tokens each, English words ≈ 1.3 tokens,
+   * punctuation/whitespace ≈ 0.3 tokens.
+   */
+  estimateTokens(text: string): number {
+    let tokens = 0;
+    // Count CJK characters (each ≈ 1.5 tokens)
+    const cjkCount = (text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g) || []).length;
+    tokens += cjkCount * 1.5;
+
+    // Remove CJK chars, count remaining
+    const nonCjk = text.replace(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g, '');
+    // English words (≈ 1.3 tokens each)
+    const words = nonCjk.match(/[a-zA-Z]+/g) || [];
+    tokens += words.length * 1.3;
+
+    // Numbers
+    const numbers = nonCjk.match(/\d+/g) || [];
+    tokens += numbers.length;
+
+    // Punctuation and whitespace (≈ 0.3 each)
+    const punct = nonCjk.replace(/[a-zA-Z0-9\s]/g, '').length;
+    tokens += punct * 0.3;
+
+    return Math.ceil(tokens) || Math.ceil(text.length / 4);
   }
 
   /**

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS memories (
   emotion_context TEXT,
   keywords TEXT,          -- comma-separated for fast keyword search
   source_message_id TEXT,
+  user_id TEXT,           -- null = agent-level shared memory, set = user-specific
   recall_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_recalled_at TEXT,
@@ -142,3 +143,21 @@ CREATE TABLE IF NOT EXISTS impulse_states (
   suppression_count INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- === Relationships (Social Engine) ===
+CREATE TABLE IF NOT EXISTS relationships (
+  id TEXT PRIMARY KEY,
+  agent_a TEXT NOT NULL REFERENCES agents(id),
+  agent_b TEXT NOT NULL REFERENCES agents(id),
+  type TEXT NOT NULL DEFAULT 'acquaintance' CHECK(type IN ('acquaintance','friend','rival','family','romantic','mentor')),
+  affinity REAL NOT NULL DEFAULT 0.0,  -- -1.0 (hostile) to +1.0 (intimate)
+  notes TEXT,                           -- free-form relationship notes
+  interaction_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationships_agent_a
+  ON relationships(agent_a);
+CREATE INDEX IF NOT EXISTS idx_relationships_agent_b
+  ON relationships(agent_b);

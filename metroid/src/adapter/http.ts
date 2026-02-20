@@ -42,6 +42,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '8100');
 const DATA_DIR = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
 const LOG_DIR = resolve(DATA_DIR, 'logs');
+const API_TOKEN = process.env.METROID_API_TOKEN || '';
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 
 // Ensure log directory exists
 mkdirSync(LOG_DIR, { recursive: true });
@@ -316,7 +318,16 @@ setInterval(() => {
 async function readBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', c => chunks.push(c));
+    let totalSize = 0;
+    req.on('data', (c: Buffer) => {
+      totalSize += c.length;
+      if (totalSize > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('body too large'));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
       try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
       catch { resolve({}); }
@@ -334,9 +345,79 @@ function error(res: ServerResponse, msg: string, status = 400) {
   json(res, { error: msg }, status);
 }
 
+/** Basic input sanitization: trim strings, enforce max length */
+function sanitize(input: string | undefined, maxLen = 10000): string {
+  if (!input || typeof input !== 'string') return '';
+  return input.trim().slice(0, maxLen);
+}
+
+// === Rate Limiting (sliding window) ===
+
+const rateLimits = {
+  mutation: { windowMs: 60_000, maxRequests: 60 },  // 60/min for POST
+  read: { windowMs: 60_000, maxRequests: 600 },     // 600/min for GET
+};
+
+const requestLog = new Map<string, number[]>(); // ip → timestamps
+
+function checkRateLimit(ip: string, type: 'mutation' | 'read'): boolean {
+  const config = rateLimits[type];
+  const now = Date.now();
+  const key = `${ip}:${type}`;
+  const timestamps = requestLog.get(key) ?? [];
+
+  // Remove expired entries
+  const cutoff = now - config.windowMs;
+  const valid = timestamps.filter(t => t > cutoff);
+
+  if (valid.length >= config.maxRequests) return false;
+
+  valid.push(now);
+  requestLog.set(key, valid);
+  return true;
+}
+
+// Clean up rate limit entries every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [key, timestamps] of requestLog) {
+    const valid = timestamps.filter(t => t > cutoff);
+    if (valid.length === 0) requestLog.delete(key);
+    else requestLog.set(key, valid);
+  }
+}, 300_000);
+
 // === Route matching ===
 
 type Handler = (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => Promise<void> | void;
+
+/** Simple schema validation for POST body fields */
+interface FieldSchema {
+  type: 'string' | 'number' | 'boolean' | 'object';
+  required?: boolean;
+  maxLength?: number;
+  enum?: string[];
+}
+
+function validate(body: any, schema: Record<string, FieldSchema>): string | null {
+  for (const [key, rule] of Object.entries(schema)) {
+    const val = body[key];
+    if (rule.required && (val === undefined || val === null || val === '')) {
+      return `${key} is required`;
+    }
+    if (val === undefined || val === null) continue;
+    if (rule.type === 'string' && typeof val !== 'string') return `${key} must be a string`;
+    if (rule.type === 'number' && typeof val !== 'number') return `${key} must be a number`;
+    if (rule.type === 'boolean' && typeof val !== 'boolean') return `${key} must be a boolean`;
+    if (rule.maxLength && typeof val === 'string' && val.length > rule.maxLength) {
+      return `${key} exceeds max length ${rule.maxLength}`;
+    }
+    if (rule.enum && !rule.enum.includes(val)) {
+      return `${key} must be one of: ${rule.enum.join(', ')}`;
+    }
+  }
+  return null;
+}
 
 interface Route {
   method: string;
@@ -424,11 +505,6 @@ function logConversation(agentId: string, agentName: string, entry: any) {
 
 // === Routes ===
 
-route('GET', '/health', (_req, res) => {
-  const agents = metroid.getAllAgents();
-  json(res, { status: 'ok', agents: agents.length, uptime: process.uptime() });
-});
-
 route('GET', '/agents', (_req, res) => {
   const agents = metroid.getAllAgents().map(a => ({
     id: a.id, name: a.name, mode: a.mode,
@@ -460,8 +536,8 @@ route('GET', '/agents/:id', (_req, res, { id }) => {
 route('POST', '/agents/:id/mode', async (req, res, { id }) => {
   const body = await readBody(req);
   if (!['classic', 'enhanced'].includes(body.mode)) return error(res, 'mode must be classic or enhanced');
-  metroid.setAgentMode(id, body.mode as AgentMode);
-  json(res, { ok: true, mode: body.mode });
+  const ritual = metroid.setAgentMode(id, body.mode as AgentMode);
+  json(res, { ok: true, mode: body.mode, ritual });
 });
 
 route('POST', '/agents/:id/chat', async (req, res, { id }) => {
@@ -469,17 +545,25 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
   if (!agent) return error(res, 'agent not found', 404);
 
   const body = await readBody(req);
-  if (!body.content) return error(res, 'content required');
+  const validationErr = validate(body, {
+    content: { type: 'string', required: true, maxLength: 10000 },
+    userId: { type: 'string', maxLength: 100 },
+    userName: { type: 'string', maxLength: 100 },
+    channel: { type: 'string', enum: ['web-im', 'telegram', 'discord'] },
+  });
+  if (validationErr) return error(res, validationErr, 422);
+  const content = sanitize(body.content);
+  if (!content) return error(res, 'content required');
 
   const userMsg: MetroidMessage = {
     id: `msg-${++msgCounter}-${Date.now()}`,
     channel: body.channel || 'web-im',
     author: {
-      id: body.userId || 'user-api',
-      name: body.userName || '用户',
+      id: sanitize(body.userId, 100) || 'user-api',
+      name: sanitize(body.userName, 100) || '用户',
       isBot: false,
     },
-    content: body.content,
+    content,
     timestamp: Date.now(),
   };
 
@@ -497,7 +581,7 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
   }));
 
   try {
-    const result = await metroid.chat(id, userMsg, history);
+    const result = await metroid.chat(id, userMsg, history, body.sessionId);
     const emotion = metroid.getEmotionState(id);
     const growthCount = metroid.getActiveGrowthChanges(id).length;
     const growthChanges = metroid.getActiveGrowthChanges(id);
@@ -739,6 +823,179 @@ route('GET', '/debug/config', (_req, res) => {
   json(res, { llm });
 });
 
+// === Relationship endpoints ===
+
+route('GET', '/agents/:id/relationships', (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const relationships = metroid.getRelationships(id);
+  json(res, { relationships });
+});
+
+route('POST', '/agents/:id/relationships', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (!body.targetAgentId || !body.type) return error(res, 'targetAgentId and type required');
+  const target = metroid.getAgent(body.targetAgentId);
+  if (!target) return error(res, 'target agent not found', 404);
+  const rel = metroid.setRelationship(id, body.targetAgentId, body.type, body.affinity ?? 0, body.notes);
+  json(res, { relationship: rel }, 201);
+});
+
+// === Session endpoints (P5-7) ===
+
+route('POST', '/agents/:id/sessions', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  const result = metroid.startSession(id, body.userId);
+  json(res, {
+    session: { id: result.session.id, agentId: id, startedAt: result.session.startedAt.toISOString() },
+    previousContext: result.previousContext.map(m => ({
+      role: m.role, content: m.content, authorName: m.authorName, createdAt: m.createdAt.toISOString(),
+    })),
+  }, 201);
+});
+
+route('GET', '/agents/:id/sessions', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '20');
+  const sessions = metroid.listSessions(id, limit);
+  json(res, {
+    sessions: sessions.map(s => ({
+      id: s.id, startedAt: s.startedAt.toISOString(),
+      endedAt: s.endedAt?.toISOString(), summary: s.summary,
+    })),
+  });
+});
+
+route('POST', '/sessions/:id/end', async (req, res, { id }) => {
+  const body = await readBody(req);
+  metroid.endSession(id, body.summary);
+  json(res, { ok: true });
+});
+
+route('GET', '/sessions/:id/messages', (req, res, { id }) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '100');
+  const messages = metroid.getSessionMessages(id, limit);
+  json(res, {
+    messages: messages.map(m => ({
+      role: m.role, content: m.content, authorName: m.authorName, createdAt: m.createdAt.toISOString(),
+    })),
+  });
+});
+
+// === Feed endpoints (P5-2) ===
+
+route('GET', '/agents/:id/feed', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '20');
+  const entries = metroid.getFeed(id, limit);
+  json(res, {
+    entries: entries.map(e => ({
+      id: e.id, type: e.type, content: e.content, source: e.source,
+      createdAt: e.createdAt.toISOString(),
+    })),
+  });
+});
+
+route('POST', '/agents/:id/feed/generate', async (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const entries = metroid.generateFeed(id);
+  json(res, {
+    generated: entries.map(e => ({
+      id: e.id, type: e.type, content: e.content, source: e.source,
+      createdAt: e.createdAt.toISOString(),
+    })),
+  });
+});
+
+// === Conversation endpoints (P5-1) ===
+
+route('POST', '/conversations', async (req, res) => {
+  const body = await readBody(req);
+  if (!body.agentIds || !Array.isArray(body.agentIds) || body.agentIds.length === 0) {
+    return error(res, 'agentIds array required');
+  }
+  const conv = metroid.createConversation(body.title, body.createdBy || 'api', body.agentIds);
+  json(res, { conversation: { id: conv.id, title: conv.title, participants: conv.participants, createdAt: conv.createdAt.toISOString() } }, 201);
+});
+
+route('GET', '/conversations', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '20');
+  const convs = metroid.listConversations(limit);
+  json(res, {
+    conversations: convs.map(c => ({
+      id: c.id, title: c.title, participants: c.participants,
+      createdAt: c.createdAt.toISOString(), updatedAt: c.updatedAt.toISOString(),
+    })),
+  });
+});
+
+route('GET', '/conversations/:id', (_req, res, { id }) => {
+  const conv = metroid.getConversation(id);
+  if (!conv) return error(res, 'conversation not found', 404);
+  json(res, {
+    id: conv.id, title: conv.title, participants: conv.participants,
+    createdAt: conv.createdAt.toISOString(), updatedAt: conv.updatedAt.toISOString(),
+  });
+});
+
+route('GET', '/conversations/:id/messages', (req, res, { id }) => {
+  const conv = metroid.getConversation(id);
+  if (!conv) return error(res, 'conversation not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '100');
+  const messages = metroid.getConversationMessages(id, limit);
+  json(res, {
+    messages: messages.map(m => ({
+      role: m.role, content: m.content, agentId: m.agentId, userId: m.userId,
+      authorName: m.authorName, createdAt: m.createdAt.toISOString(),
+    })),
+  });
+});
+
+route('POST', '/conversations/:id/message', async (req, res, { id }) => {
+  const conv = metroid.getConversation(id);
+  if (!conv) return error(res, 'conversation not found', 404);
+  const body = await readBody(req);
+  if (!body.content) return error(res, 'content required');
+
+  try {
+    const result = await metroid.conversationChat(
+      id, sanitize(body.content),
+      body.userId || 'user-api', body.userName || '用户',
+    );
+    if (!result) return error(res, 'no agent available to respond', 500);
+
+    // Broadcast to WS clients
+    wsBroadcast(result.agentId, {
+      type: 'conversation_message',
+      conversationId: id,
+      agentId: result.agentId,
+      agentName: result.agentName,
+      response: result.response,
+    });
+
+    json(res, {
+      agentId: result.agentId,
+      agentName: result.agentName,
+      response: result.response,
+      timing: result.timing,
+    });
+  } catch (err: any) {
+    error(res, `conversation chat failed: ${err.message}`, 500);
+  }
+});
+
 // === Server ===
 
 init();
@@ -777,12 +1034,38 @@ const server = createServer(async (req, res) => {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  // Serve web UI at root
+  // Serve web UI at root (no auth required)
   if (method === 'GET' && (url === '/' || url === '/index.html')) {
     serveStatic(res, resolve(__dirname, '../../public/index.html'), 'text/html; charset=utf-8');
+    return;
+  }
+
+  // Health check (no auth required)
+  if (method === 'GET' && url === '/health') {
+    const agents = metroid.getAllAgents();
+    json(res, { status: 'ok', agents: agents.length, uptime: process.uptime() });
+    return;
+  }
+
+  // Bearer token auth (if METROID_API_TOKEN is set)
+  if (API_TOKEN) {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    if (token !== API_TOKEN) {
+      error(res, 'unauthorized', 401);
+      return;
+    }
+  }
+
+  // Rate limiting
+  const clientIp = (req.socket.remoteAddress || '127.0.0.1');
+  const limitType = method === 'POST' ? 'mutation' : 'read';
+  if (!checkRateLimit(clientIp, limitType)) {
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
+    res.end(JSON.stringify({ error: 'rate limit exceeded' }));
     return;
   }
 
@@ -811,4 +1094,28 @@ server.listen(PORT, '127.0.0.1', () => {
 // WebSocket upgrade
 server.on('upgrade', (req, socket, _head) => {
   wsUpgrade(req, socket as Socket);
+});
+
+// === Graceful error recovery ===
+
+process.on('uncaughtException', (err) => {
+  console.error('[Metroid] Uncaught exception:', err);
+  try { metroid.shutdown(); } catch { /* best effort */ }
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Metroid] Unhandled rejection:', reason);
+});
+
+process.on('SIGTERM', () => {
+  console.log('[Metroid] SIGTERM received, shutting down...');
+  metroid.shutdown();
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+  console.log('[Metroid] SIGINT received, shutting down...');
+  metroid.shutdown();
+  server.close(() => process.exit(0));
 });

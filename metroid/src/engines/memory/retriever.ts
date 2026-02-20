@@ -67,10 +67,15 @@ export class MemoryRetriever {
       ? merged.filter(m => query.privacyFilter!.includes(m.privacy))
       : merged;
 
+    // Apply user isolation: include user-specific + shared (null userId) memories
+    const userFiltered = query.userId
+      ? filtered.filter(m => !m.userId || m.userId === query.userId)
+      : filtered;
+
     // Exclude faded unless requested
     const active = query.includesFaded
-      ? filtered
-      : filtered.filter(m => !m.fadedAt);
+      ? userFiltered
+      : userFiltered.filter(m => !m.fadedAt);
 
     // Layer 3: Score and rank
     const scored: MemoryScore[] = active.map(m => ({

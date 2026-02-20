@@ -5,9 +5,10 @@ import type { MetroidConfig } from '../../config.js';
 /**
  * Forgetting mechanism: periodically decay importance scores
  * and fade memories that drop below threshold.
+ * Manages per-agent timers so multiple agents each get their own decay cycle.
  */
 export class MemoryForgetter {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timers = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(
     private store: MemoryStore,
@@ -15,20 +16,30 @@ export class MemoryForgetter {
     private config: MetroidConfig,
   ) {}
 
-  /** Start periodic forgetting cycle (every hour) */
+  /** Start periodic forgetting cycle for a specific agent (every hour) */
   start(agentId: string): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => {
+    if (this.timers.has(agentId)) return;
+    const timer = setInterval(() => {
       this.decayCycle(agentId).catch(err =>
-        console.error('[Forgetter] decay cycle failed:', err)
+        console.error(`[Forgetter] decay cycle failed for ${agentId}:`, err)
       );
     }, 60 * 60 * 1000); // every hour
+    this.timers.set(agentId, timer);
   }
 
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
+  /** Stop forgetting cycle. If agentId given, stop only that agent; otherwise stop all. */
+  stop(agentId?: string): void {
+    if (agentId) {
+      const timer = this.timers.get(agentId);
+      if (timer) {
+        clearInterval(timer);
+        this.timers.delete(agentId);
+      }
+    } else {
+      for (const timer of this.timers.values()) {
+        clearInterval(timer);
+      }
+      this.timers.clear();
     }
   }
 

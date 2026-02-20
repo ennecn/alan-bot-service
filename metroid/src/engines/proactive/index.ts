@@ -118,6 +118,20 @@ export class ProactiveEngine implements Engine {
         SELECT COUNT(*) as cnt FROM proactive_messages
         WHERE agent_id = ? AND delivered = 0
       `),
+      loadImpulse: this.db.prepare(`
+        SELECT * FROM impulse_states WHERE agent_id = ?
+      `),
+      upsertImpulse: this.db.prepare(`
+        INSERT INTO impulse_states (agent_id, impulse_value, last_decay_time, last_fire_time, active_events, suppression_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(agent_id) DO UPDATE SET
+          impulse_value = excluded.impulse_value,
+          last_decay_time = excluded.last_decay_time,
+          last_fire_time = excluded.last_fire_time,
+          active_events = excluded.active_events,
+          suppression_count = excluded.suppression_count,
+          updated_at = datetime('now')
+      `),
     };
   }
 
@@ -352,9 +366,22 @@ export class ProactiveEngine implements Engine {
     }
   }
 
-  /** Initialize impulse state for an agent */
+  /** Initialize impulse state for an agent — loads from DB if available */
   private initImpulseState(agentId: string): void {
-    if (!this.impulseStates.has(agentId)) {
+    if (this.impulseStates.has(agentId)) return;
+
+    // Try loading persisted state from DB
+    const row = this.stmts.loadImpulse.get(agentId) as any;
+    if (row) {
+      this.impulseStates.set(agentId, {
+        value: row.impulse_value,
+        lastDecayTime: row.last_decay_time ? new Date(row.last_decay_time).getTime() : this.now(),
+        lastFireTime: row.last_fire_time ? new Date(row.last_fire_time).getTime() : 0,
+        activeEvents: JSON.parse(row.active_events || '[]'),
+        suppressionCount: row.suppression_count,
+      });
+      console.log(`[Impulse] Loaded persisted state for ${agentId} (value=${row.impulse_value.toFixed(3)})`);
+    } else {
       this.impulseStates.set(agentId, {
         value: 0,
         lastDecayTime: this.now(),
@@ -363,6 +390,20 @@ export class ProactiveEngine implements Engine {
         suppressionCount: 0,
       });
     }
+  }
+
+  /** Persist impulse state to DB */
+  private persistImpulseState(agentId: string): void {
+    const state = this.impulseStates.get(agentId);
+    if (!state) return;
+    this.stmts.upsertImpulse.run(
+      agentId,
+      state.value,
+      new Date(state.lastDecayTime).toISOString(),
+      state.lastFireTime ? new Date(state.lastFireTime).toISOString() : null,
+      JSON.stringify(state.activeEvents),
+      state.suppressionCount,
+    );
   }
 
   /** Inject an event into the impulse system (from API or conversation detection) */
@@ -453,6 +494,9 @@ export class ProactiveEngine implements Engine {
         console.log(`[Impulse] Suppressed for ${agent.name} (impulse=${state.value.toFixed(3)}, threshold=${dynamicThreshold.toFixed(3)}, p=${fireProbability.toFixed(3)}, suppressions=${state.suppressionCount})`);
       }
     }
+
+    // Persist state after every evaluation
+    this.persistImpulseState(agentId);
   }
 
   /** Compute activation for a single signal */

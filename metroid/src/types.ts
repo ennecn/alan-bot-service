@@ -16,6 +16,7 @@ export interface Memory {
   emotionContext?: EmotionState;
   keywords: string[];
   sourceMessageId?: string;
+  userId?: string;          // null = agent-level shared, set = user-specific
   recallCount: number;
   createdAt: Date;
   lastRecalledAt?: Date;
@@ -29,6 +30,7 @@ export interface MemoryQuery {
   includesFaded?: boolean;  // default false
   privacyFilter?: PrivacyLevel[];
   timeWindowHours?: number; // restrict to recent N hours
+  userId?: string;          // filter to user-specific + shared memories
 }
 
 export interface MemoryScore {
@@ -115,6 +117,10 @@ export interface MetroidCard {
     enabled: boolean;
     triggers: ProactiveTrigger[];
     impulse?: ImpulseConfig;
+  };
+  modeTransition?: {
+    toEnhanced?: string;
+    toClassic?: string;
   };
 }
 
@@ -258,4 +264,7 @@ export interface EngineContext {
   message: MetroidMessage;
   conversationHistory: MetroidMessage[];
   userName?: string;
+  userId?: string;
+  /** Privacy level for memory retrieval. Defaults to excluding 'sensitive'. */
+  privacyLevel?: PrivacyLevel;
 }
