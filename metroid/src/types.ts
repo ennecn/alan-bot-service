@@ -76,6 +76,8 @@ export interface AgentIdentity {
   updatedAt: Date;
 }
 
+export type RpMode = 'off' | 'sfw' | 'nsfw';
+
 export interface MetroidCard {
   // ST V2 compatible
   name: string;
@@ -87,13 +89,17 @@ export interface MetroidCard {
   creatorNotes?: string;
 
   // Metroid extensions
+  rpMode?: RpMode;  // RP instruction level: off=no RP, sfw=RP without explicit, nsfw=full RP
   soul?: {
     immutableValues: string[];
     mutableTraits: Array<{ trait: string; intensity: number }>;
   };
   emotion?: {
     baseline: EmotionState;
-    intensityDial: number;  // 0-1
+    intensityDial: number;    // 0-1, sensitivity: how much events affect emotions
+    resilience?: number;      // 0-1, how fast emotions recover (0=brooding, 1=bouncy)
+    expressiveness?: number;  // 0-1, how easily impulse converts to action
+    restraint?: number;       // 0-1, self-control (0=impulsive, 1=restrained)
   };
   memoryStyle?: {
     encodingRate: number;
@@ -105,6 +111,89 @@ export interface MetroidCard {
     maxDrift: number;
     logChanges: boolean;
   };
+  proactive?: {
+    enabled: boolean;
+    triggers: ProactiveTrigger[];
+    impulse?: ImpulseConfig;
+  };
+}
+
+// === Proactive Types ===
+
+export type ProactiveTriggerType = 'cron' | 'idle' | 'emotion' | 'event';
+
+export interface ProactiveTrigger {
+  type: ProactiveTriggerType;
+  /**
+   * Condition string per trigger type:
+   *   cron:    "HH:MM" daily schedule
+   *   idle:    minutes of user silence (e.g. "3")
+   *   emotion: one of three formats:
+   *     delta:axis<threshold/windowMin     — rate of change (e.g. "delta:pleasure<-0.3/30m")
+   *     sustained:axis<threshold/windowMin — held for duration (e.g. "sustained:pleasure<-0.3/20m")
+   *     axis<threshold                     — legacy instant check (discouraged)
+   *   event:   event name (e.g. "birthday")
+   */
+  condition: string;
+  /** prompt hint injected when trigger fires (e.g. "发一条早安问候") */
+  prompt: string;
+  /** optional cooldown in minutes between firings (default 60) */
+  cooldownMinutes?: number;
+}
+
+export interface ProactiveMessage {
+  id: string;
+  agentId: string;
+  triggerId: string;
+  triggerType: ProactiveTriggerType;
+  content: string;
+  delivered: boolean;
+  createdAt: Date;
+}
+
+// === Impulse Accumulator Types ===
+
+export interface ImpulseConfig {
+  enabled: boolean;
+  signals: ImpulseSignal[];
+  decayRate?: number;          // per-hour natural decay (default 0.1)
+  fireThreshold?: number;      // base threshold to fire (default 0.6)
+  cooldownMinutes?: number;    // min time between firings (default 30)
+  promptTemplate: string;      // LLM prompt when impulse fires
+}
+
+export interface ImpulseSignal {
+  type: 'emotion_pattern' | 'idle' | 'time_of_day';
+  weight: number;              // 0-1, contribution weight
+  emotionCondition?: EmotionPattern;
+  idleMinutes?: number;
+  timeRange?: { start: string; end: string }; // "HH:MM"
+}
+
+export interface EmotionPattern {
+  /** Multi-axis conditions — ALL must be satisfied */
+  conditions: Array<{
+    axis: 'pleasure' | 'arousal' | 'dominance';
+    op: '<' | '>';
+    value: number;
+  }>;
+  /** Require sustained for N minutes */
+  sustainedMinutes?: number;
+}
+
+export interface ImpulseState {
+  value: number;               // 0-1, current impulse level
+  lastDecayTime: number;       // timestamp
+  lastFireTime: number;        // timestamp
+  activeEvents: ActiveEvent[];
+  suppressionCount: number;    // consecutive suppressions
+}
+
+export interface ActiveEvent {
+  name: string;
+  intensity: number;           // 0-1
+  createdAt: number;           // timestamp
+  decayRate: number;           // per-hour decay (default 0.5)
 }
 
 // === Prompt Compiler Types ===
@@ -168,4 +257,5 @@ export interface EngineContext {
   mode: AgentMode;
   message: MetroidMessage;
   conversationHistory: MetroidMessage[];
+  userName?: string;
 }

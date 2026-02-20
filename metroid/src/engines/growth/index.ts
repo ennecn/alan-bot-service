@@ -32,7 +32,7 @@ const DETAIL_REQUEST_MARKERS = [
  * Growth Engine: tracks behavioral adaptations over time.
  *
  * Only active in enhanced mode. Classic mode returns empty fragments.
- * Uses rule-based pattern detection (no LLM calls) to identify
+ * Uses LLM deep pattern detection with rule-based fallback to identify
  * recurring interaction patterns and propose behavioral adaptations.
  */
 export class GrowthEngine implements Engine {
@@ -92,7 +92,9 @@ export class GrowthEngine implements Engine {
     // Evaluate at interval
     if (counter >= this.config.growth.evaluationInterval) {
       this.messageCounters.set(agentId, 0);
-      this.evaluateGrowth(agentId, recent);
+      this.evaluateGrowth(agentId, recent).catch(err =>
+        console.error('[GrowthEngine] evaluation failed:', err.message || err)
+      );
     }
   }
 
@@ -124,7 +126,7 @@ export class GrowthEngine implements Engine {
 
   // === Internal ===
 
-  private evaluateGrowth(agentId: string, recentMessages: string[]): void {
+  private async evaluateGrowth(agentId: string, recentMessages: string[]): Promise<void> {
     const agent = this.identity.getAgent(agentId);
     if (!agent?.card.growth?.enabled) return;
 
@@ -134,7 +136,12 @@ export class GrowthEngine implements Engine {
     ).get(agentId) as any;
     if (activeCount.c >= this.config.growth.maxActiveChanges) return;
 
-    const patterns = this.detectPatterns(recentMessages);
+    // Try LLM analysis first, fall back to rule-based
+    let patterns = await this.detectPatternsLLM(recentMessages).catch(() => null);
+    if (!patterns) {
+      patterns = this.detectPatterns(recentMessages);
+    }
+
     for (const pattern of patterns) {
       // Check if similar adaptation already exists
       const existing = this.db.prepare(
@@ -168,9 +175,11 @@ export class GrowthEngine implements Engine {
       });
     }
 
-    // Pattern 2: Consistently short user replies (avg < 20 chars)
+    // Pattern 2: Consistently short user replies (avg < 10 chars for CJK, < 20 for Latin)
     const avgLength = messages.reduce((s, m) => s + m.length, 0) / messages.length;
-    if (avgLength < 20 && messages.length >= 5) {
+    const hasCJK = messages.some(m => /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]/.test(m));
+    const shortThreshold = hasCJK ? 10 : 20;
+    if (avgLength < shortThreshold && messages.length >= 5) {
       patterns.push({
         observation: `用户平均消息长度仅${Math.round(avgLength)}字符`,
         adaptation: '保持回复简洁，避免过长的解释',
@@ -193,7 +202,10 @@ export class GrowthEngine implements Engine {
     // Pattern 4: Repeated topic keywords (frequency > 30%)
     const wordFreq = new Map<string, number>();
     for (const msg of lowerMessages) {
-      const words = msg.split(/\s+/).filter(w => w.length > 3);
+      // Split on whitespace for Latin, extract 2-4 char CJK segments for Chinese
+      const latinWords = msg.split(/\s+/).filter(w => w.length > 3 && !/[\u4e00-\u9fff]/.test(w));
+      const cjkMatches = msg.match(/[\u4e00-\u9fff]{2,4}/g) || [];
+      const words = [...latinWords, ...cjkMatches];
       const seen = new Set<string>();
       for (const w of words) {
         if (!seen.has(w)) { seen.add(w); wordFreq.set(w, (wordFreq.get(w) ?? 0) + 1); }
@@ -210,7 +222,100 @@ export class GrowthEngine implements Engine {
       }
     }
 
+    // Pattern 5: User frequently asks questions (curious user)
+    const questions = lowerMessages.filter(m =>
+      m.includes('?') || m.includes('？') || m.includes('吗') || m.includes('呢') ||
+      m.includes('为什么') || m.includes('怎么') || m.includes('什么') || m.includes('哪')
+    ).length;
+    if (questions >= Math.ceil(messages.length * 0.5) && messages.length >= 5) {
+      patterns.push({
+        observation: `用户在最近${messages.length}条消息中有${questions}条是提问`,
+        adaptation: '用户好奇心强，回复时可以主动补充相关背景和延伸信息',
+        confidence: 0.55,
+      });
+    }
+
     return patterns;
+  }
+
+  // === LLM deep pattern detection ===
+
+  private async detectPatternsLLM(messages: string[]): Promise<DetectedPattern[] | null> {
+    const baseUrl = this.config.llm.openaiBaseUrl;
+    const apiKey = this.config.llm.openaiApiKey || this.config.llm.apiKey;
+    if (!baseUrl || !apiKey) return null;
+
+    const snippet = messages.slice(-15).map((m, i) => `[${i + 1}] ${m}`).join('\n').slice(0, 1500);
+    const endpoint = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.config.llm.openaiModel || this.config.llm.lightModel,
+        messages: [{
+          role: 'user',
+          content: `分析以下用户消息序列，识别用户的行为模式和交互偏好。
+
+用户最近的消息：
+"""
+${snippet}
+"""
+
+请识别用户的交互模式，例如：
+- 沟通风格偏好（简洁/详细、正式/随意）
+- 反复出现的需求或兴趣话题
+- 对AI回复的隐含反馈（频繁纠正、要求展开、表示无聊等）
+- 情感表达习惯
+- 提问方式和好奇心方向
+
+返回JSON数组，每个元素包含：
+- observation: 观察到的具体模式（用中文描述，引用具体证据）
+- adaptation: 建议的行为调整（用中文，简洁可执行的指令）
+- confidence: 置信度 0.0-1.0
+
+规则：
+- 最多返回3个最显著的模式
+- confidence低于0.4的不要返回
+- adaptation应该是具体的行为指令，不是笼统的建议
+- 如果没有明显模式，返回空数组 []
+
+仅返回JSON数组，无其他文字。`,
+        }],
+        max_tokens: 500,
+      }),
+    });
+
+    if (!resp.ok) return null;
+    const result = await resp.json() as any;
+    const raw = result.choices?.[0]?.message?.content || '';
+    return this.parsePatternsJson(raw);
+  }
+
+  private parsePatternsJson(raw: string): DetectedPattern[] | null {
+    const text = raw.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    try {
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) return null;
+      return parsed
+        .filter((p: any) =>
+          typeof p.observation === 'string' &&
+          typeof p.adaptation === 'string' &&
+          typeof p.confidence === 'number' &&
+          p.confidence >= 0.4
+        )
+        .map((p: any) => ({
+          observation: p.observation.slice(0, 200),
+          adaptation: p.adaptation.slice(0, 100),
+          confidence: Math.min(1, Math.max(0, p.confidence)),
+        }))
+        .slice(0, 3);
+    } catch {
+      return null;
+    }
   }
 
   private applyChange(agentId: string, pattern: DetectedPattern): void {

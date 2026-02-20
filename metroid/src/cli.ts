@@ -322,14 +322,14 @@ async function main() {
 
     try {
       if (state.debug) console.log('[DEBUG] 发送中...');
-      const response = await metroid.chat(state.agent.id, userMsg, state.history);
+      const result = await metroid.chat(state.agent.id, userMsg, state.history);
 
       state.history.push(userMsg);
       state.history.push({
         id: `msg-${++state.msgCounter}`,
         channel: 'web-im',
         author: { id: state.agent.id, name: state.agent.name, isBot: true },
-        content: response,
+        content: result.response,
         timestamp: Date.now(),
       });
 
@@ -340,7 +340,8 @@ async function main() {
       // Refresh agent state (emotion may have changed)
       state.agent = metroid.getAgent(state.agent.id)!;
 
-      console.log(`\n${card.name}: ${response}`);
+      console.log(`\n${card.name}: ${result.response}`);
+      if (state.debug) console.log(`[timing] total=${result.timing.totalMs}ms llm=${result.timing.llmMs}ms compile=${result.timing.compileMs}ms`);
       console.log(statusLine(state));
       console.log();
     } catch (err: any) {

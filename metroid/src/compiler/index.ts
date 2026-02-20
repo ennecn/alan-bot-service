@@ -24,6 +24,23 @@ export class PromptCompiler {
     baseSystemPrompt: string,
     context: EngineContext,
   ): Promise<string> {
+    const details = await this.compileWithDetails(baseSystemPrompt, context);
+    return details.compiledPrompt;
+  }
+
+  /**
+   * Compile prompt and return full breakdown for debugging/inspection.
+   */
+  async compileWithDetails(
+    baseSystemPrompt: string,
+    context: EngineContext,
+  ): Promise<{
+    compiledPrompt: string;
+    fragments: PromptFragment[];
+    basePrompt: string;
+    tokenBudget: number;
+    tokensUsed: number;
+  }> {
     const maxTokens = this.config.llm.maxContextTokens;
     const budget = Math.floor(maxTokens * (1 - this.config.compiler.responseReserveRatio));
     const baseTokens = this.estimateTokens(baseSystemPrompt);
@@ -43,10 +60,19 @@ export class PromptCompiler {
       }
     }
 
-    if (context.mode === 'classic') {
-      return this.assembleClassic(baseSystemPrompt, allFragments, remainingBudget);
-    }
-    return this.assembleEnhanced(baseSystemPrompt, allFragments, remainingBudget);
+    const compiledPrompt = context.mode === 'classic'
+      ? this.assembleClassic(baseSystemPrompt, allFragments, remainingBudget)
+      : this.assembleEnhanced(baseSystemPrompt, allFragments, remainingBudget);
+
+    const tokensUsed = this.estimateTokens(compiledPrompt);
+
+    return {
+      compiledPrompt,
+      fragments: allFragments,
+      basePrompt: baseSystemPrompt,
+      tokenBudget: budget,
+      tokensUsed,
+    };
   }
 
   /** Notify all engines after LLM response */
@@ -61,6 +87,7 @@ export class PromptCompiler {
   /**
    * Classic mode: ST-style assembly.
    * Order: before_char → identity → after_char → world(no position) → at_depth → before_an → after_an
+   * Within same position, stable sources (identity, world) before dynamic (emotion, memory).
    */
   private assembleClassic(
     base: string,
@@ -81,7 +108,11 @@ export class PromptCompiler {
       const aPos = a.position ? posOrder[a.position] ?? 3 : (a.source === 'identity' ? 1 : 3);
       const bPos = b.position ? posOrder[b.position] ?? 3 : (b.source === 'identity' ? 1 : 3);
       if (aPos !== bPos) return aPos - bPos;
-      return b.priority - a.priority; // within same position, higher priority first
+      // Within same position: stable sources first for cache friendliness
+      const aStable = this.sectionOrder(a.source);
+      const bStable = this.sectionOrder(b.source);
+      if (aStable !== bStable) return aStable - bStable;
+      return b.priority - a.priority;
     });
 
     const included: PromptFragment[] = [];
@@ -137,13 +168,19 @@ export class PromptCompiler {
     return Math.ceil(text.length / 3);
   }
 
+  /**
+   * Section ordering optimized for KV cache hit rate.
+   * Stable content first (identity, world, growth rarely change),
+   * dynamic content last (emotion, memory change every turn).
+   * This maximizes prefix cache reuse across conversation turns.
+   */
   private sectionOrder(source: string): number {
     const order: Record<string, number> = {
-      identity: 0,
-      emotion: 1,
-      world: 2,
-      memory: 3,
-      growth: 4,
+      identity: 0,  // character card — never changes mid-conversation
+      world: 1,     // lorebook/scenario — rarely changes
+      growth: 2,    // behavioral changes — changes infrequently
+      emotion: 3,   // PAD state — may change every turn
+      memory: 4,    // retrieved memories — changes every turn
       tool: 5,
     };
     return order[source] ?? 5;

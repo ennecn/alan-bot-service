@@ -3,338 +3,717 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Metroid Test Panel</title>
+<title>Metroid Debug Console</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
-
-/* Header */
 .header { background: #161b22; border-bottom: 1px solid #30363d; padding: 8px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 .header h1 { font-size: 16px; color: #58a6ff; font-weight: 600; }
 .header select, .header button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
 .header button:hover { background: #30363d; }
-.header .mode-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.mode-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
 .mode-classic { background: #1f6feb33; color: #58a6ff; }
 .mode-enhanced { background: #23863633; color: #3fb950; }
-
-/* Main layout */
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ws-connected { background: #3fb950; } .ws-disconnected { background: #f85149; } .ws-connecting { background: #f0883e; }
+.tab-bar { background: #161b22; border-bottom: 1px solid #30363d; display: flex; padding: 0 16px; flex-shrink: 0; }
+.tab-bar button { background: none; border: none; color: #8b949e; padding: 8px 16px; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; }
+.tab-bar button:hover { color: #c9d1d9; }
+.tab-bar button.active { color: #58a6ff; border-bottom-color: #58a6ff; }
 .main { display: flex; flex: 1; overflow: hidden; }
-
-/* Chat panel */
-.chat-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #30363d; }
+.tab-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.tab-panel { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+.tab-panel.active { display: flex; }
 .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .msg-user { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 4px; }
 .msg-bot { align-self: flex-start; background: #21262d; border: 1px solid #30363d; border-bottom-left-radius: 4px; }
 .msg-system { align-self: center; color: #8b949e; font-size: 12px; font-style: italic; }
-.msg-time { font-size: 11px; color: #8b949e; margin-top: 4px; }
-
-/* Input */
+.msg-proactive { align-self: flex-start; background: #1a2332; border: 1px solid #1f6feb44; border-bottom-left-radius: 4px; color: #79c0ff; }
+.msg-proactive::before { content: '[ 主动 ] '; font-size: 11px; color: #58a6ff; }
+.msg-timing { font-size: 11px; color: #58a6ff; cursor: pointer; margin-top: 2px; display: inline-block; }
+.msg-timing:hover { text-decoration: underline; }
 .input-bar { display: flex; gap: 8px; padding: 12px 16px; background: #161b22; border-top: 1px solid #30363d; flex-shrink: 0; }
 .input-bar input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; font-size: 14px; outline: none; }
 .input-bar input:focus { border-color: #58a6ff; }
 .input-bar button { background: #238636; color: #fff; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600; }
 .input-bar button:hover { background: #2ea043; }
 .input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* Side panel */
-.side-panel { width: 320px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; flex-shrink: 0; }
-.panel-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; }
-.panel-section h3 { font-size: 13px; color: #8b949e; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-
-/* PAD bars */
-.pad-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
-.pad-label { width: 24px; font-weight: 600; }
-.pad-bar { flex: 1; height: 8px; background: #21262d; border-radius: 4px; position: relative; overflow: hidden; }
+.side-panel { width: 340px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; flex-shrink: 0; border-left: 1px solid #30363d; }
+.panel-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px; }
+.panel-section h3 { font-size: 12px; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.pad-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 13px; }
+.pad-label { width: 16px; font-weight: 600; }
+.pad-bar { flex: 1; height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
 .pad-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
 .pad-value { width: 44px; text-align: right; font-size: 12px; color: #8b949e; }
-.pad-tag { font-size: 11px; color: #8b949e; width: 48px; }
-
-/* Growth items */
-.growth-item { font-size: 13px; padding: 6px 0; border-bottom: 1px solid #21262d; }
+.pad-tag { font-size: 11px; width: 48px; }
+.impulse-bar { height: 10px; background: #21262d; border-radius: 5px; overflow: hidden; margin: 4px 0; }
+.impulse-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #3fb950, #f0883e, #f85149); transition: width 0.3s; }
+.impulse-info { font-size: 11px; color: #8b949e; margin-top: 4px; }
+.growth-item { font-size: 13px; padding: 4px 0; border-bottom: 1px solid #21262d; }
 .growth-item:last-child { border-bottom: none; }
-.growth-conf { color: #8b949e; font-size: 11px; }
-
-/* Memory items */
-.memory-item { font-size: 12px; padding: 4px 0; border-bottom: 1px solid #21262d; color: #8b949e; }
+.growth-obs { font-size: 11px; color: #8b949e; }
+.memory-item { font-size: 12px; padding: 3px 0; border-bottom: 1px solid #21262d; }
 .memory-type { display: inline-block; background: #21262d; padding: 1px 6px; border-radius: 3px; font-size: 10px; margin-right: 4px; }
-
-/* Quick test */
+.debug-row { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
+.debug-row button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+.debug-row button:hover { background: #30363d; }
+.debug-row input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-size: 11px; flex: 1; min-width: 80px; }
 .quick-tests { display: flex; flex-wrap: wrap; gap: 4px; }
 .quick-tests button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
 .quick-tests button:hover { background: #30363d; }
-
-/* Responsive */
-@media (max-width: 768px) { .side-panel { display: none; } }
+.inspector-layout { display: flex; flex: 1; overflow: hidden; }
+.frag-list { width: 260px; overflow-y: auto; border-right: 1px solid #30363d; padding: 8px; }
+.frag-item { padding: 8px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; font-size: 12px; }
+.frag-item:hover { border-color: #30363d; }
+.frag-item.selected { border-color: #58a6ff; background: #161b22; }
+.frag-source { font-weight: 600; font-size: 13px; }
+.frag-meta { color: #8b949e; font-size: 11px; }
+.frag-detail { flex: 1; overflow-y: auto; padding: 12px; }
+.frag-detail pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.inspector-bar { display: flex; gap: 8px; padding: 8px 12px; background: #161b22; border-top: 1px solid #30363d; align-items: center; font-size: 12px; }
+.inspector-bar input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+.inspector-bar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.inspector-bar button:hover { background: #30363d; }
+.inspector-stats { color: #8b949e; white-space: nowrap; }
+.src-identity { color: #58a6ff; } .src-world { color: #3fb950; } .src-emotion { color: #f0883e; }
+.src-memory { color: #a371f7; } .src-growth { color: #e3b341; } .src-proactive { color: #f778ba; }
+.config-panel { padding: 16px; overflow-y: auto; flex: 1; }
+.config-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.config-section h3 { font-size: 13px; color: #58a6ff; margin-bottom: 10px; }
+.config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+.config-row label { width: 120px; color: #8b949e; flex-shrink: 0; }
+.config-row input, .config-row select { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+.config-row .radio-group { display: flex; gap: 12px; }
+.config-row .radio-group label { width: auto; cursor: pointer; display: flex; align-items: center; gap: 4px; color: #c9d1d9; }
+.config-apply { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; cursor: pointer; margin-top: 8px; }
+.config-apply:hover { background: #2ea043; }
+.config-note { font-size: 11px; color: #f0883e; margin-top: 8px; }
+.config-json { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-size: 11px; white-space: pre-wrap; max-height: 200px; overflow-y: auto; color: #8b949e; }
+.logs-panel { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.log-files { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 12px; border-bottom: 1px solid #30363d; background: #161b22; }
+.log-files button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.log-files button:hover { background: #30363d; }
+.log-files button.active { border-color: #58a6ff; color: #58a6ff; }
+.log-entries { flex: 1; overflow-y: auto; padding: 8px 12px; }
+.log-entry { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px; font-size: 12px; cursor: pointer; }
+.log-entry:hover { border-color: #58a6ff33; }
+.log-entry-header { display: flex; gap: 8px; align-items: center; color: #8b949e; }
+.log-entry-preview { color: #c9d1d9; margin-top: 4px; }
+.log-entry-detail { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid #21262d; white-space: pre-wrap; color: #8b949e; font-size: 11px; }
+.log-entry.expanded .log-entry-detail { display: block; }
+@media (max-width: 900px) { .side-panel { display: none; } }
 </style>
 </head>
 <body>
 
 <!-- Header -->
 <div class="header">
-  <h1>Metroid Test Panel</h1>
-  <select id="agentSelect"></select>
-  <span id="modeBadge" class="mode-badge"></span>
-  <button onclick="toggleMode()">切换模式</button>
-  <button onclick="runQuickTests()">跑对比测试</button>
-  <span id="statusText" style="margin-left:auto;font-size:12px;color:#8b949e"></span>
+  <h1>Metroid</h1>
+  <select id="agentSelect"><option value="">Select Agent...</option></select>
+  <span id="modeBadge" class="mode-badge" style="display:none"></span>
+  <button id="modeToggle" style="display:none">Toggle Mode</button>
+  <span style="margin-left:auto; display:flex; align-items:center; gap:4px; font-size:12px; color:#8b949e;">
+    <span id="wsDot" class="ws-dot ws-disconnected"></span>
+    <span id="wsLabel">disconnected</span>
+  </span>
+</div>
+
+<!-- Tab bar -->
+<div class="tab-bar">
+  <button class="active" data-tab="chat">Chat</button>
+  <button data-tab="inspector">Inspector</button>
+  <button data-tab="config">Config</button>
+  <button data-tab="logs">Logs</button>
 </div>
 
 <!-- Main -->
 <div class="main">
-  <!-- Chat -->
-  <div class="chat-panel">
+<div class="tab-content">
+
+  <!-- Chat Tab -->
+  <div class="tab-panel active" id="tab-chat">
     <div class="messages" id="messages"></div>
     <div class="input-bar">
-      <input id="chatInput" placeholder="输入消息..." autocomplete="off">
-      <button id="sendBtn" onclick="sendMessage()">发送</button>
+      <input id="chatInput" placeholder="Type a message..." autocomplete="off">
+      <button id="sendBtn" disabled>Send</button>
     </div>
   </div>
 
-  <!-- Side panel -->
-  <div class="side-panel">
-    <!-- Emotion -->
-    <div class="panel-section">
-      <h3>情绪状态 (PAD)</h3>
-      <div id="emotionPanel">
-        <div class="pad-row"><span class="pad-label">P</span><div class="pad-bar"><div class="pad-fill" id="padP" style="width:50%;background:#3fb950"></div></div><span class="pad-value" id="padPVal">0.00</span><span class="pad-tag" id="padPTag">中性</span></div>
-        <div class="pad-row"><span class="pad-label">A</span><div class="pad-bar"><div class="pad-fill" id="padA" style="width:50%;background:#f0883e"></div></div><span class="pad-value" id="padAVal">0.00</span><span class="pad-tag" id="padATag">中性</span></div>
-        <div class="pad-row"><span class="pad-label">D</span><div class="pad-bar"><div class="pad-fill" id="padD" style="width:50%;background:#a371f7"></div></div><span class="pad-value" id="padDVal">0.00</span><span class="pad-tag" id="padDTag">中性</span></div>
+  <!-- Inspector Tab -->
+  <div class="tab-panel" id="tab-inspector">
+    <div class="inspector-layout">
+      <div class="frag-list" id="fragList"><div style="color:#8b949e;font-size:12px;padding:8px;">Click "Inspect" to load prompt fragments</div></div>
+      <div class="frag-detail" id="fragDetail"><pre id="fragContent" style="color:#8b949e;">Select a fragment from the list</pre></div>
+    </div>
+    <div class="inspector-bar">
+      <button onclick="runInspect()">Inspect Current</button>
+      <input id="inspectText" placeholder="Custom message to inspect...">
+      <button onclick="runInspect(document.getElementById('inspectText').value)">Run</button>
+      <span class="inspector-stats" id="inspectStats"></span>
+    </div>
+  </div>
+
+  <!-- Config Tab -->
+  <div class="tab-panel" id="tab-config">
+    <div class="config-panel">
+      <div class="config-section">
+        <h3>LLM Configuration</h3>
+        <div class="config-row"><label>OpenAI Model</label><input id="cfgModel" placeholder="e.g. deepseek-ai/DeepSeek-V3"></div>
+        <div class="config-row"><label>Fallback Model</label><input id="cfgFallback" placeholder="e.g. Qwen/Qwen3-235B-A22B"></div>
+        <button class="config-apply" onclick="applyLLMConfig()">Apply Model Changes</button>
+        <div class="config-note">Changes are session-only and reset on restart.</div>
+      </div>
+      <div class="config-section">
+        <h3>Agent Configuration</h3>
+        <div class="config-row"><label>RP Mode</label>
+          <div class="radio-group">
+            <label><input type="radio" name="rpMode" value="off"> off</label>
+            <label><input type="radio" name="rpMode" value="sfw"> sfw</label>
+            <label><input type="radio" name="rpMode" value="nsfw"> nsfw</label>
+          </div>
+        </div>
+        <div class="config-row"><label>Agent Mode</label>
+          <div class="radio-group">
+            <label><input type="radio" name="agentMode" value="classic"> classic</label>
+            <label><input type="radio" name="agentMode" value="enhanced"> enhanced</label>
+          </div>
+        </div>
+        <button class="config-apply" onclick="applyAgentConfig()">Apply Agent Changes</button>
+      </div>
+      <div class="config-section">
+        <h3>Current Config</h3>
+        <div class="config-json" id="configJson">Loading...</div>
       </div>
     </div>
+  </div>
 
-    <!-- Growth -->
-    <div class="panel-section">
-      <h3>行为成长</h3>
-      <div id="growthPanel"><span style="color:#8b949e;font-size:13px">暂无变化</span></div>
+  <!-- Logs Tab -->
+  <div class="tab-panel" id="tab-logs">
+    <div class="logs-panel">
+      <div class="log-files" id="logFiles"><span style="color:#8b949e;font-size:12px;">Loading log files...</span></div>
+      <div class="log-entries" id="logEntries"><div style="color:#8b949e;font-size:12px;padding:12px;">Select a log file above</div></div>
     </div>
+  </div>
 
-    <!-- Memories -->
-    <div class="panel-section">
-      <h3>最近记忆</h3>
-      <div id="memoryPanel"><span style="color:#8b949e;font-size:13px">暂无记忆</span></div>
-    </div>
+</div><!-- tab-content -->
 
-    <!-- Quick tests -->
-    <div class="panel-section">
-      <h3>快速测试</h3>
-      <div class="quick-tests">
-        <button onclick="quickSend('Hi! I just moved to this neighborhood.')">初次见面</button>
-        <button onclick="quickSend('Do you know anything about Mondstadt?')">Mondstadt</button>
-        <button onclick="quickSend(`There\\'s a character called Venti who\\'s a god disguised as a bard.`)">Venti</button>
-        <button onclick="quickSend('What made you want to become a pediatrician?')">个人话题</button>
-        <button onclick="quickSend('I was nervous about talking to you. You seem so kind.')">情感互动</button>
-      </div>
+<!-- Side Panel -->
+<div class="side-panel" id="sidePanel">
+  <div class="panel-section" id="emotionPanel">
+    <h3>Emotion (PAD)</h3>
+    <div id="padBars">—</div>
+  </div>
+  <div class="panel-section" id="impulsePanel">
+    <h3>Impulse</h3>
+    <div class="impulse-bar"><div class="impulse-fill" id="impulseFill" style="width:0%"></div></div>
+    <div class="impulse-info" id="impulseInfo">—</div>
+  </div>
+  <div class="panel-section">
+    <h3>Growth</h3>
+    <div id="growthList">—</div>
+  </div>
+  <div class="panel-section">
+    <h3>Memories</h3>
+    <div id="memoryList">—</div>
+  </div>
+  <div class="panel-section">
+    <h3>Debug Controls</h3>
+    <div id="clockInfo" style="font-size:11px;color:#8b949e;margin-bottom:4px;">Clock: +0min</div>
+    <div class="debug-row">
+      <button onclick="clockAdvance(10)">+10m</button>
+      <button onclick="clockAdvance(60)">+1h</button>
+      <button onclick="clockAdvance(360)">+6h</button>
+      <button onclick="clockReset()">Reset</button>
+      <button onclick="manualTick()">Tick</button>
     </div>
+    <div class="debug-row">
+      <input id="eventInput" placeholder="Event name...">
+      <button onclick="fireEvent()">Fire</button>
+    </div>
+  </div>
+  <div class="panel-section">
+    <h3>Quick Tests</h3>
+    <div class="quick-tests" id="quickTests"></div>
   </div>
 </div>
 
-<script>
-const API = '';
-let currentAgent = null;
-let chatHistory = [];
+</div><!-- main -->
 
-// === Init ===
-async function init() {
-  await loadAgents();
-  setInterval(refreshSidePanel, 5000);
+<script>
+// === State ===
+let ws = null, currentAgentId = null, currentAgentName = '', chatHistory = [];
+const API = '';
+
+// === Tab System ===
+document.querySelectorAll('.tab-bar button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'logs') loadLogFiles();
+    if (btn.dataset.tab === 'config') loadConfig();
+  });
+});
+function switchTab(name) {
+  document.querySelectorAll('.tab-bar button').forEach(b => { b.classList.toggle('active', b.dataset.tab === name); });
+  document.querySelectorAll('.tab-panel').forEach(p => { p.classList.toggle('active', p.id === 'tab-' + name); });
 }
 
-async function loadAgents() {
-  const res = await fetch(`${API}/agents`);
-  const { agents } = await res.json();
-  const sel = document.getElementById('agentSelect');
-  sel.innerHTML = agents.map(a =>
-    `<option value="${a.id}">${a.name} [${a.mode}]</option>`
-  ).join('');
-  if (agents.length > 0) {
-    currentAgent = agents[0];
-    sel.value = agents[0].id;
-    updateModeBadge(agents[0].mode);
-    refreshSidePanel();
-  }
-  sel.onchange = () => {
-    currentAgent = agents.find(a => a.id === sel.value);
-    chatHistory = [];
-    document.getElementById('messages').innerHTML = '';
-    updateModeBadge(currentAgent.mode);
-    refreshSidePanel();
-    addSystemMsg(`已切换到 ${currentAgent.name}`);
+// === WebSocket ===
+function wsConnect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host);
+  setWsStatus('connecting');
+  ws.onopen = () => {
+    setWsStatus('connected');
+    if (currentAgentId) ws.send(JSON.stringify({ type: 'subscribe', agentId: currentAgentId }));
+  };
+  ws.onclose = () => { setWsStatus('disconnected'); setTimeout(wsConnect, 3000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    handleWsMessage(msg);
   };
 }
 
-// === Chat ===
-async function sendMessage() {
-  const input = document.getElementById('chatInput');
-  const content = input.value.trim();
-  if (!content || !currentAgent) return;
+function setWsStatus(s) {
+  const dot = document.getElementById('wsDot');
+  const label = document.getElementById('wsLabel');
+  dot.className = 'ws-dot ws-' + s;
+  label.textContent = s;
+}
 
-  input.value = '';
-  addMsg(content, 'user');
-
-  const btn = document.getElementById('sendBtn');
-  btn.disabled = true;
-  btn.textContent = '...';
-
-  try {
-    const res = await fetch(`${API}/agents/${currentAgent.id}/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        content,
-        userId: 'test-user',
-        userName: '测试员',
-        history: chatHistory.slice(-20),
-      }),
-    });
-    const data = await res.json();
-    if (data.error) { addSystemMsg(`错误: ${data.error}`); return; }
-
-    chatHistory.push({ content, isBot: false });
-    chatHistory.push({ content: data.response, isBot: true });
-
-    addMsg(data.response, 'bot');
-    if (data.emotion) updateEmotion(data.emotion);
-    updateStatus(`${data.mode} | 成长:${data.growthChanges}`);
-    refreshSidePanel();
-  } catch (err) {
-    addSystemMsg(`请求失败: ${err.message}`);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '发送';
+function handleWsMessage(msg) {
+  if (msg.type === 'subscribed') {
+    addSystemMsg('Connected to ' + msg.agentName + ' [' + msg.mode + ']');
+    updateModeBadge(msg.mode);
   }
-}
-
-function quickSend(text) {
-  document.getElementById('chatInput').value = text;
-  sendMessage();
-}
-
-async function runQuickTests() {
-  const tests = [
-    'Hi Rachel, I just moved to this neighborhood. Someone told me you teach theology to kids at the church?',
-    "By the way, I've been playing Genshin Impact lately. Do you know anything about Mondstadt?",
-    "There's this character called Venti who's actually a god disguised as a bard. Kind of reminds me of angels in disguise, don't you think?",
-    'What made you want to become a pediatrician? Was it something from your childhood?',
-    'I have to admit, I was nervous about talking to you. You seem so kind and genuine.',
-  ];
-  addSystemMsg('开始对比测试 (5 轮)...');
-  for (let i = 0; i < tests.length; i++) {
-    addSystemMsg(`--- Test ${i + 1}/5 ---`);
-    document.getElementById('chatInput').value = tests[i];
-    await sendMessage();
-    await new Promise(r => setTimeout(r, 500));
+  if (msg.type === 'state_sync') {
+    updateEmotion(msg.emotion);
+    updateGrowth(msg.growth);
+    updateMemories(msg.memories);
+    if (msg.impulse) updateImpulse(msg.impulse);
   }
-  addSystemMsg('对比测试完成！日志已保存。');
+  if (msg.type === 'chat_response') {
+    document.getElementById('sendBtn').disabled = false;
+    addBotMsg(msg.response, msg.timing, msg.fragmentSummary);
+    updateEmotion(msg.emotion);
+    updateGrowth(msg.growth);
+    updateMemories(msg.memories);
+    if (msg.impulse) updateImpulse(msg.impulse);
+    if (msg.mode) updateModeBadge(msg.mode);
+    chatHistory.push({ content: msg.response, isBot: true });
+  }
+  if (msg.type === 'proactive') {
+    addProactiveMsg(msg.message.content);
+  }
+  if (msg.type === 'error') {
+    addSystemMsg('Error: ' + msg.message);
+    document.getElementById('sendBtn').disabled = false;
+  }
+  if (msg.type === 'pong') { /* heartbeat ok */ }
 }
 
-// === Mode ===
-async function toggleMode() {
-  if (!currentAgent) return;
-  const newMode = currentAgent.mode === 'classic' ? 'enhanced' : 'classic';
-  await fetch(`${API}/agents/${currentAgent.id}/mode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: newMode }),
+// === Agent Selection ===
+async function loadAgents() {
+  const res = await fetch(API + '/agents');
+  const data = await res.json();
+  const sel = document.getElementById('agentSelect');
+  sel.innerHTML = '<option value="">Select Agent...</option>';
+  data.agents.forEach(a => {
+    const opt = document.createElement('option');
+    opt.value = a.id; opt.textContent = a.name + ' [' + a.mode + ']';
+    sel.appendChild(opt);
   });
-  currentAgent.mode = newMode;
-  updateModeBadge(newMode);
-  addSystemMsg(`模式已切换为 ${newMode}`);
-  refreshSidePanel();
+}
+
+document.getElementById('agentSelect').addEventListener('change', (e) => {
+  currentAgentId = e.target.value;
+  if (!currentAgentId) return;
+  currentAgentName = e.target.options[e.target.selectedIndex].textContent;
+  chatHistory = [];
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('sendBtn').disabled = false;
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'subscribe', agentId: currentAgentId }));
+  }
+  loadConfig();
+});
+
+// === Chat ===
+function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text || !currentAgentId || !ws || ws.readyState !== 1) return;
+  input.value = '';
+  document.getElementById('sendBtn').disabled = true;
+  addUserMsg(text);
+  chatHistory.push({ content: text, isBot: false });
+  ws.send(JSON.stringify({ type: 'chat', content: text, history: chatHistory.slice(-10) }));
+}
+
+document.getElementById('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+document.getElementById('sendBtn').addEventListener('click', sendMessage);
+
+function addUserMsg(text) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-user';
+  el.textContent = text;
+  document.getElementById('messages').appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth' });
+}
+
+function addBotMsg(text, timing, fragmentSummary) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-bot';
+  el.textContent = text;
+  if (timing) {
+    const badge = document.createElement('div');
+    badge.className = 'msg-timing';
+    badge.textContent = '[' + (timing.totalMs/1000).toFixed(1) + 's | LLM ' + (timing.llmMs/1000).toFixed(1) + 's]';
+    badge.onclick = () => { switchTab('inspector'); runInspect(); };
+    el.appendChild(badge);
+  }
+  document.getElementById('messages').appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth' });
+}
+
+function addSystemMsg(text) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-system';
+  el.textContent = text;
+  document.getElementById('messages').appendChild(el);
+}
+
+function addProactiveMsg(text) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-proactive';
+  el.textContent = text;
+  document.getElementById('messages').appendChild(el);
+  el.scrollIntoView({ behavior: 'smooth' });
 }
 
 function updateModeBadge(mode) {
   const badge = document.getElementById('modeBadge');
   badge.textContent = mode;
-  badge.className = `mode-badge mode-${mode}`;
+  badge.className = 'mode-badge mode-' + mode;
+  badge.style.display = '';
+  document.getElementById('modeToggle').style.display = '';
 }
 
-// === Side panel ===
-async function refreshSidePanel() {
-  if (!currentAgent) return;
-  try {
-    const [emotionRes, growthRes, memoryRes] = await Promise.all([
-      fetch(`${API}/agents/${currentAgent.id}/emotion`),
-      fetch(`${API}/agents/${currentAgent.id}/growth`),
-      fetch(`${API}/agents/${currentAgent.id}/memories?limit=8`),
-    ]);
-    const emotion = await emotionRes.json();
-    const growth = await growthRes.json();
-    const memory = await memoryRes.json();
-
-    if (emotion.emotion) updateEmotion(emotion.emotion);
-    updateGrowth(growth.changes || []);
-    updateMemories(memory.memories || []);
-  } catch {}
-}
-
-function updateEmotion(e) {
-  setPad('P', e.pleasure, '#3fb950');
-  setPad('A', e.arousal, '#f0883e');
-  setPad('D', e.dominance, '#a371f7');
-}
-
-function setPad(axis, value, color) {
-  const pct = ((value + 1) / 2) * 100;
-  document.getElementById(`pad${axis}`).style.width = pct + '%';
-  document.getElementById(`pad${axis}`).style.background = color;
-  document.getElementById(`pad${axis}Val`).textContent = (value >= 0 ? '+' : '') + value.toFixed(2);
-  const labels = {
-    P: v => v > 0.5 ? '愉快' : v > 0 ? '偏愉快' : v > -0.5 ? '偏低落' : '低落',
-    A: v => v > 0.5 ? '兴奋' : v > 0 ? '偏活跃' : v > -0.5 ? '偏平静' : '低沉',
-    D: v => v > 0.5 ? '自信' : v > 0 ? '偏自信' : v > -0.5 ? '偏谦逊' : '顺从',
-  };
-  document.getElementById(`pad${axis}Tag`).textContent = labels[axis](value);
-}
-
-function updateGrowth(changes) {
-  const el = document.getElementById('growthPanel');
-  if (changes.length === 0) { el.innerHTML = '<span style="color:#8b949e;font-size:13px">暂无变化</span>'; return; }
-  el.innerHTML = changes.map(c =>
-    `<div class="growth-item">${c.adaptation} <span class="growth-conf">${Math.round(c.confidence * 100)}%</span></div>`
-  ).join('');
-}
-
-function updateMemories(memories) {
-  const el = document.getElementById('memoryPanel');
-  if (memories.length === 0) { el.innerHTML = '<span style="color:#8b949e;font-size:13px">暂无记忆</span>'; return; }
-  el.innerHTML = memories.map(m =>
-    `<div class="memory-item"><span class="memory-type">${m.type}</span>${m.content.slice(0, 80)}</div>`
-  ).join('');
-}
-
-// === UI helpers ===
-function addMsg(text, type) {
-  const el = document.getElementById('messages');
-  const div = document.createElement('div');
-  div.className = `msg msg-${type}`;
-  div.textContent = text;
-  const time = document.createElement('div');
-  time.className = 'msg-time';
-  time.textContent = new Date().toLocaleTimeString();
-  div.appendChild(time);
-  el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
-}
-
-function addSystemMsg(text) {
-  const el = document.getElementById('messages');
-  const div = document.createElement('div');
-  div.className = 'msg msg-system';
-  div.textContent = text;
-  el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
-}
-
-function updateStatus(text) {
-  document.getElementById('statusText').textContent = text;
-}
-
-// Enter to send
-document.getElementById('chatInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+document.getElementById('modeToggle').addEventListener('click', async () => {
+  if (!currentAgentId) return;
+  const badge = document.getElementById('modeBadge');
+  const newMode = badge.textContent === 'classic' ? 'enhanced' : 'classic';
+  await fetch(API + '/agents/' + currentAgentId + '/mode', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: newMode })
+  });
+  updateModeBadge(newMode);
 });
 
+// === Side Panel: Emotion ===
+function updateEmotion(emotion) {
+  if (!emotion) return;
+  const padNames = { pleasure: { label: 'P', color: '#3fb950' }, arousal: { label: 'A', color: '#f0883e' }, dominance: { label: 'D', color: '#a371f7' } };
+  const tags = { pleasure: v => v > 0.2 ? '愉快' : v < -0.2 ? '不快' : '平静', arousal: v => v > 0.2 ? '活跃' : v < -0.2 ? '低沉' : '平稳', dominance: v => v > 0.2 ? '主导' : v < -0.2 ? '谦逊' : '中性' };
+  let html = '';
+  for (const [key, cfg] of Object.entries(padNames)) {
+    const v = emotion[key] || 0;
+    const pct = ((v + 1) / 2 * 100).toFixed(0);
+    const tagColor = v > 0.2 ? cfg.color : v < -0.2 ? '#f85149' : '#8b949e';
+    html += '<div class="pad-row"><span class="pad-label" style="color:' + cfg.color + '">' + cfg.label + '</span>';
+    html += '<div class="pad-bar"><div class="pad-fill" style="width:' + pct + '%;background:' + cfg.color + '"></div></div>';
+    html += '<span class="pad-value">' + v.toFixed(3) + '</span>';
+    html += '<span class="pad-tag" style="color:' + tagColor + '">' + tags[key](v) + '</span></div>';
+  }
+  document.getElementById('padBars').innerHTML = html;
+}
+
+// === Side Panel: Impulse ===
+function updateImpulse(impulse) {
+  if (!impulse) return;
+  const pct = Math.min(100, (impulse.value || 0) * 100);
+  document.getElementById('impulseFill').style.width = pct.toFixed(0) + '%';
+  let info = 'Value: ' + (impulse.value || 0).toFixed(3);
+  if (impulse.activeEvents && impulse.activeEvents.length > 0) {
+    info += ' | Events: ' + impulse.activeEvents.map(e => typeof e === 'string' ? e : e.name).join(', ');
+  }
+  if (impulse.suppressionCount || impulse.suppressions) {
+    info += ' | Supp: ' + (impulse.suppressionCount || impulse.suppressions || 0);
+  }
+  document.getElementById('impulseInfo').textContent = info;
+}
+
+// === Side Panel: Growth ===
+function updateGrowth(growth) {
+  if (!growth || !growth.length) { document.getElementById('growthList').textContent = 'No changes'; return; }
+  let html = '';
+  for (const g of growth) {
+    html += '<div class="growth-item">' + escHtml(g.adaptation);
+    if (g.confidence !== undefined) html += ' <span style="color:#8b949e">(' + Math.round(g.confidence * 100) + '%)</span>';
+    if (g.observation) html += '<div class="growth-obs">' + escHtml(g.observation) + '</div>';
+    html += '</div>';
+  }
+  document.getElementById('growthList').innerHTML = html;
+}
+
+// === Side Panel: Memories ===
+function updateMemories(memories) {
+  if (!memories || !memories.length) { document.getElementById('memoryList').textContent = 'No memories'; return; }
+  let html = '';
+  for (const m of memories) {
+    html += '<div class="memory-item"><span class="memory-type">' + m.type + '</span>' + escHtml(m.content) + '</div>';
+  }
+  document.getElementById('memoryList').innerHTML = html;
+}
+
+// === Inspector Tab ===
+let lastInspectResult = null;
+async function runInspect(text) {
+  if (!currentAgentId) return;
+  const url = API + '/agents/' + currentAgentId + '/prompt-inspect' + (text ? '?text=' + encodeURIComponent(text) : '');
+  const res = await fetch(url);
+  const data = await res.json();
+  lastInspectResult = data;
+  renderFragments(data);
+}
+
+function renderFragments(data) {
+  const list = document.getElementById('fragList');
+  list.innerHTML = '';
+  if (!data.fragments || !data.fragments.length) {
+    list.innerHTML = '<div style="color:#8b949e;font-size:12px;padding:8px;">No fragments</div>';
+    return;
+  }
+  // Base prompt item
+  const baseEl = document.createElement('div');
+  baseEl.className = 'frag-item';
+  baseEl.innerHTML = '<div class="frag-source" style="color:#c9d1d9">base prompt</div><div class="frag-meta">' + Math.ceil(data.basePrompt.length / 3) + ' tokens</div>';
+  baseEl.onclick = () => { selectFrag(baseEl); document.getElementById('fragContent').textContent = data.basePrompt; };
+  list.appendChild(baseEl);
+
+  for (const f of data.fragments) {
+    const el = document.createElement('div');
+    el.className = 'frag-item';
+    const srcClass = 'src-' + f.source;
+    el.innerHTML = '<div class="frag-source ' + srcClass + '">' + f.source + '</div>' +
+      '<div class="frag-meta">pri ' + f.priority + ' | ' + f.tokens + ' tok' + (f.required ? ' | REQ' : '') + '</div>';
+    el.onclick = () => { selectFrag(el); document.getElementById('fragContent').textContent = f.content; };
+    list.appendChild(el);
+  }
+
+  document.getElementById('inspectStats').textContent = data.tokensUsed + ' / ' + data.tokenBudget + ' tokens | ' + data.mode + ' mode';
+}
+
+function selectFrag(el) {
+  document.querySelectorAll('.frag-item').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+// === Config Tab ===
+async function loadConfig() {
+  if (!currentAgentId) return;
+  try {
+    const res = await fetch(API + '/agents/' + currentAgentId + '/config');
+    const data = await res.json();
+    document.getElementById('cfgModel').value = data.llm.openaiModel || '';
+    document.getElementById('cfgFallback').value = data.llm.openaiModelFallback || '';
+    // Set radio buttons
+    document.querySelectorAll('input[name="rpMode"]').forEach(r => { r.checked = r.value === (data.agent.rpMode || 'off'); });
+    document.querySelectorAll('input[name="agentMode"]').forEach(r => { r.checked = r.value === data.agent.mode; });
+    document.getElementById('configJson').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    document.getElementById('configJson').textContent = 'Error loading config: ' + e.message;
+  }
+}
+
+async function applyLLMConfig() {
+  if (!currentAgentId) return;
+  const body = {};
+  const model = document.getElementById('cfgModel').value.trim();
+  const fallback = document.getElementById('cfgFallback').value.trim();
+  if (model) body.openaiModel = model;
+  if (fallback) body.openaiModelFallback = fallback;
+  const res = await fetch(API + '/agents/' + currentAgentId + '/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  addSystemMsg('Config applied: ' + JSON.stringify(data.applied));
+  loadConfig();
+}
+
+async function applyAgentConfig() {
+  if (!currentAgentId) return;
+  const body = {};
+  const rpMode = document.querySelector('input[name="rpMode"]:checked');
+  const agentMode = document.querySelector('input[name="agentMode"]:checked');
+  if (rpMode) body.rpMode = rpMode.value;
+  if (agentMode) body.mode = agentMode.value;
+  const res = await fetch(API + '/agents/' + currentAgentId + '/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  addSystemMsg('Agent config applied: ' + JSON.stringify(data.applied));
+  if (body.mode) updateModeBadge(body.mode);
+  loadConfig();
+}
+
+// === Logs Tab ===
+let currentLogFile = null;
+async function loadLogFiles() {
+  try {
+    const res = await fetch(API + '/logs');
+    const data = await res.json();
+    const container = document.getElementById('logFiles');
+    if (!data.files || !data.files.length) {
+      container.innerHTML = '<span style="color:#8b949e;font-size:12px;">No log files found</span>';
+      return;
+    }
+    container.innerHTML = '';
+    for (const f of data.files) {
+      const btn = document.createElement('button');
+      btn.textContent = f.replace('.jsonl', '');
+      btn.onclick = () => {
+        container.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadLogEntries(f);
+      };
+      container.appendChild(btn);
+    }
+  } catch (e) {
+    document.getElementById('logFiles').innerHTML = '<span style="color:#f85149;font-size:12px;">Error: ' + e.message + '</span>';
+  }
+}
+
+async function loadLogEntries(filename) {
+  currentLogFile = filename;
+  const container = document.getElementById('logEntries');
+  try {
+    const res = await fetch(API + '/logs/' + filename);
+    const data = await res.json();
+    if (!data.entries || !data.entries.length) {
+      container.innerHTML = '<div style="color:#8b949e;font-size:12px;padding:12px;">No entries</div>';
+      return;
+    }
+    container.innerHTML = '';
+    for (const entry of data.entries.reverse()) {
+      const el = document.createElement('div');
+      el.className = 'log-entry';
+      const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '?';
+      const mode = entry.mode || '?';
+      const modeClass = mode === 'enhanced' ? 'mode-enhanced' : 'mode-classic';
+      const userName = entry.user?.name || '?';
+      const userContent = (entry.user?.content || '').slice(0, 60);
+      const botContent = (entry.response || '').slice(0, 80);
+      const timingStr = entry.timing ? ' [' + (entry.timing.totalMs/1000).toFixed(1) + 's]' : '';
+
+      el.innerHTML = '<div class="log-entry-header">' +
+        '<span class="log-entry-time">' + time + '</span>' +
+        '<span class="log-entry-mode ' + modeClass + '" style="padding:1px 6px;border-radius:3px;">' + mode + '</span>' +
+        '<span style="color:#3fb950">' + escHtml(userName) + '</span>' +
+        '<span style="color:#8b949e">' + timingStr + '</span>' +
+        '</div>' +
+        '<div class="log-entry-preview"><b style="color:#58a6ff">U:</b> ' + escHtml(userContent) + '</div>' +
+        '<div class="log-entry-preview"><b style="color:#3fb950">A:</b> ' + escHtml(botContent) + '</div>' +
+        '<div class="log-entry-detail"><pre>' + escHtml(JSON.stringify(entry, null, 2)) + '</pre></div>';
+      el.onclick = () => el.classList.toggle('expanded');
+      container.appendChild(el);
+    }
+  } catch (e) {
+    container.innerHTML = '<div style="color:#f85149;font-size:12px;padding:12px;">Error: ' + e.message + '</div>';
+  }
+}
+
+// === Debug Controls ===
+async function clockAdvance(minutes) {
+  if (!currentAgentId) return;
+  const res = await fetch(API + '/debug/clock/advance', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ minutes })
+  });
+  const data = await res.json();
+  document.getElementById('clockInfo').textContent = 'Clock: +' + data.totalOffsetMinutes + 'min';
+  addSystemMsg('Clock advanced +' + minutes + 'min (total: +' + data.totalOffsetMinutes + 'min)');
+}
+
+async function clockReset() {
+  await fetch(API + '/debug/clock/reset', { method: 'POST' });
+  document.getElementById('clockInfo').textContent = 'Clock: +0min';
+  addSystemMsg('Clock reset to real time');
+}
+
+async function manualTick() {
+  if (!currentAgentId) return;
+  const res = await fetch(API + '/debug/tick/' + currentAgentId, { method: 'POST' });
+  const data = await res.json();
+  if (data.impulse) {
+    updateImpulse({ value: data.impulse.value, activeEvents: [], suppressionCount: data.impulse.suppressions || 0 });
+    addSystemMsg('Tick: impulse=' + data.impulse.value.toFixed(3) + ' events=' + data.impulse.events + ' supp=' + data.impulse.suppressions);
+  } else {
+    addSystemMsg('Tick completed (no impulse data)');
+  }
+}
+
+async function fireEvent() {
+  if (!currentAgentId) return;
+  const input = document.getElementById('eventInput');
+  const event = input.value.trim();
+  if (!event) return;
+  input.value = '';
+  try {
+    const res = await fetch(API + '/agents/' + currentAgentId + '/proactive/fire', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ event })
+    });
+    const data = await res.json();
+    if (data.message) {
+      addSystemMsg('Event "' + event + '" fired: ' + data.message.content.slice(0, 80));
+    } else {
+      addSystemMsg('Event "' + event + '": ' + (data.error || 'no trigger matched'));
+    }
+  } catch (e) {
+    addSystemMsg('Event fire error: ' + e.message);
+  }
+}
+
+// === Quick Tests ===
+const quickTests = [
+  { label: '初次见面', text: '你好，我们第一次见面呢！' },
+  { label: '日常闲聊', text: '今天天气真好啊，想出去走走。' },
+  { label: '情感话题', text: '有时候觉得好累啊，什么都不想做。' },
+  { label: '回忆测试', text: '你还记得我之前跟你说过什么吗？' },
+  { label: '告别', text: '我要走了，再见。' },
+  { label: '想念', text: '好久不见，我好想你。' },
+];
+function initQuickTests() {
+  const container = document.getElementById('quickTests');
+  for (const t of quickTests) {
+    const btn = document.createElement('button');
+    btn.textContent = t.label;
+    btn.onclick = () => { document.getElementById('chatInput').value = t.text; sendMessage(); };
+    container.appendChild(btn);
+  }
+}
+
+// === Helpers ===
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// === Init ===
+async function init() {
+  await loadAgents();
+  wsConnect();
+  initQuickTests();
+  // Load clock offset
+  try {
+    const res = await fetch(API + '/debug/clock');
+    const data = await res.json();
+    document.getElementById('clockInfo').textContent = 'Clock: +' + (data.offsetMinutes || 0) + 'min';
+  } catch {}
+}
 init();
 </script>
 </body>

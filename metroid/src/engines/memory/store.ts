@@ -68,6 +68,20 @@ export class MemoryStore {
       `),
 
       fade: this.db.prepare(`UPDATE memories SET faded_at = datetime('now') WHERE id = ?`),
+
+      updateEmbedding: this.db.prepare(`UPDATE memories SET embedding = ? WHERE id = ?`),
+
+      getWithEmbedding: this.db.prepare(`
+        SELECT * FROM memories
+        WHERE agent_id = ? AND embedding IS NOT NULL AND faded_at IS NULL
+        ORDER BY created_at DESC LIMIT ?
+      `),
+
+      findBySourceMessageId: this.db.prepare(`
+        SELECT * FROM memories
+        WHERE agent_id = ? AND source_message_id = ?
+        LIMIT 1
+      `),
     };
   }
 
@@ -122,6 +136,23 @@ export class MemoryStore {
 
   fade(id: string): void {
     this.stmts.fade.run(id);
+  }
+
+  updateEmbedding(id: string, embedding: Buffer): void {
+    this.stmts.updateEmbedding.run(embedding, id);
+  }
+
+  getWithEmbedding(agentId: string, limit = 500): Array<Memory & { embeddingBuf: Buffer }> {
+    const rows = this.stmts.getWithEmbedding.all(agentId, limit) as any[];
+    return rows.map(r => ({
+      ...this.rowToMemory(r),
+      embeddingBuf: r.embedding as Buffer,
+    }));
+  }
+
+  findBySourceMessageId(agentId: string, sourceMessageId: string): Memory | null {
+    const row = this.stmts.findBySourceMessageId.get(agentId, sourceMessageId) as any;
+    return row ? this.rowToMemory(row) : null;
   }
 
   private rowToMemory(row: any): Memory {

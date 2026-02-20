@@ -6,7 +6,7 @@ export interface MetroidConfig {
 
   // Memory settings
   memory: {
-    encodingSampleRate: number;   // 0-1, default 0.3
+    encodingSampleRate: number;   // deprecated: all messages are now stored
     importanceThreshold: number;  // min importance to promote STM→LTM
     fadeThreshold: number;        // below this = faded
     maxRetrievalResults: number;
@@ -20,6 +20,13 @@ export interface MetroidConfig {
     mainModel: string;            // for conversation
     lightModel: string;           // for encoding, classification
     maxContextTokens: number;
+    // OpenAI-compatible API (e.g. SiliconFlow, OpenRouter)
+    openaiBaseUrl?: string;       // if set, use OpenAI format instead of Anthropic
+    openaiApiKey?: string;
+    openaiModel?: string;         // model name for OpenAI-compatible API
+    openaiModelFallback?: string; // fallback model when primary fails
+    fallbackMaxRetries?: number;  // max retries before giving up (default 1)
+    requestTimeoutMs?: number;    // per-request timeout (default 60000)
   };
 
   // Prompt compiler
@@ -39,6 +46,17 @@ export interface MetroidConfig {
     evaluationInterval: number;  // evaluate every N messages
     minConfidence: number;       // threshold to apply change
     maxActiveChanges: number;    // cap on active behavioral changes
+  };
+
+  // Proactive engine
+  proactive: {
+    checkIntervalMs: number;     // how often to evaluate triggers (default 60s)
+    maxPendingMessages: number;  // max queued messages per agent (default 5)
+    defaultCooldownMinutes: number; // default cooldown between firings (default 60)
+    // Impulse accumulator defaults
+    impulseDecayRate: number;       // per-hour natural decay (default 0.1)
+    impulseFireThreshold: number;   // base threshold to fire (default 0.6)
+    impulseCooldownMinutes: number; // min time between impulse firings (default 30)
   };
 }
 
@@ -62,6 +80,12 @@ export const defaultConfig: MetroidConfig = {
     mainModel: 'claude-opus-4-6',
     lightModel: 'claude-haiku-4-5-20251001',
     maxContextTokens: 200_000,
+    openaiBaseUrl: process.env.OPENAI_BASE_URL,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+    openaiModel: process.env.OPENAI_MODEL,
+    openaiModelFallback: process.env.OPENAI_MODEL_FALLBACK,
+    fallbackMaxRetries: 1,
+    requestTimeoutMs: 60_000,
   },
 
   compiler: {
@@ -78,5 +102,14 @@ export const defaultConfig: MetroidConfig = {
     evaluationInterval: 10,
     minConfidence: 0.5,
     maxActiveChanges: 20,
+  },
+
+  proactive: {
+    checkIntervalMs: 60_000,
+    maxPendingMessages: 5,
+    defaultCooldownMinutes: 60,
+    impulseDecayRate: 0.1,
+    impulseFireThreshold: 0.6,
+    impulseCooldownMinutes: 30,
   },
 };

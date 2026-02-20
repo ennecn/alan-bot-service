@@ -1,5 +1,22 @@
 import { extractPngText } from './png-parser.js';
-import type { MetroidCard } from '../types.js';
+import type { MetroidCard, RpMode } from '../types.js';
+
+/** Detect rpMode from card content — checks for NSFW indicators */
+function detectRpMode(description: string, firstMes: string, mesExample: string): RpMode {
+  const text = `${description}\n${firstMes}\n${mesExample}`;
+  const nsfwPatterns = [
+    /sex|nsfw|smut|erotic/i,
+    /性行为|性爱|做爱|色色|好色/,
+    /pussy|cock|breast_size|sensitive_zone|sex_skill|orgasm/i,
+    /阴[蒂唇道茎]|乳[头房首晕]|穴|射精|高潮|爱液|精液/,
+    /搾精|足交|后入|口交|手淫|自慰/,
+    /内衣|裸|脱[光衣]|掀[起开]/,
+  ];
+  if (nsfwPatterns.some(p => p.test(text))) return 'nsfw';
+  // If it has RP-style first message (actions in asterisks), default to sfw RP
+  if (/\*[^*]+\*/.test(firstMes) || /\*[^*]+\*/.test(mesExample)) return 'sfw';
+  return 'sfw'; // default to sfw RP for character cards
+}
 
 /** Raw ST Character Card V2 data structure */
 interface STCardV2 {
@@ -99,6 +116,9 @@ export function importSTCardFromPng(pngPath: string, userName = '用户'): STCar
     scenario: replace(d.scenario),
     creatorNotes: d.creator_notes,
 
+    // Auto-detect RP mode from card content
+    rpMode: detectRpMode(d.description, d.first_mes, d.mes_example),
+
     // Metroid extensions — defaults, user can customize later
     soul: {
       immutableValues: [],
@@ -114,7 +134,7 @@ export function importSTCardFromPng(pngPath: string, userName = '用户'): STCar
       nostalgiaTendency: 0.5,
     },
     growth: {
-      enabled: false, // disabled for imported cards by default
+      enabled: true,
       maxDrift: 0.3,
       logChanges: true,
     },
@@ -165,13 +185,14 @@ export function importSTCardFromJson(jsonPath: string, userName = '用户'): STC
     mesExample: replace(d.mes_example || ''),
     scenario: replace(d.scenario || ''),
     creatorNotes: d.creator_notes,
+    rpMode: detectRpMode(d.description || '', d.first_mes || '', d.mes_example || ''),
     soul: { immutableValues: [], mutableTraits: [] },
     emotion: {
       baseline: { pleasure: 0, arousal: 0, dominance: 0 },
       intensityDial: d.extensions?.talkativeness ?? 0.5,
     },
     memoryStyle: { encodingRate: 0.3, forgettingCurve: 'normal', nostalgiaTendency: 0.5 },
-    growth: { enabled: false, maxDrift: 0.3, logChanges: true },
+    growth: { enabled: true, maxDrift: 0.3, logChanges: true },
   };
 
   const warnings: string[] = [];

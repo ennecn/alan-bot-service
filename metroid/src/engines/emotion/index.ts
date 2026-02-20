@@ -14,17 +14,22 @@ const POSITIVE_WORDS = [
   'love', 'great', 'amazing', 'wonderful', 'beautiful', 'awesome', 'fantastic',
   'happy', 'glad', 'thank', 'thanks', 'appreciate', 'perfect', 'excellent',
   'haha', 'hehe', 'lol', 'lmao', 'cute', 'sweet', 'kind', 'nice',
+  'fun', 'enjoy', 'warm', 'comfort', 'smile', 'laugh', 'joy', 'hope',
   // Chinese
   '喜欢', '爱', '开心', '快乐', '高兴', '棒', '好棒', '太好了', '感谢', '谢谢',
   '哈哈', '嘻嘻', '可爱', '温柔', '甜', '赞', '厉害', '优秀', '完美',
+  '不错', '好的', '好吧', '有趣', '好看', '漂亮', '舒服', '温暖', '陪',
+  '一起', '逛逛', '珍惜', '回忆', '笑', '期待', '想念', '感动', '幸福',
 ];
 
 const NEGATIVE_WORDS = [
   'hate', 'angry', 'annoyed', 'frustrated', 'terrible', 'awful', 'horrible',
   'sad', 'upset', 'disappointed', 'boring', 'stupid', 'useless', 'wrong',
-  'ugh', 'sigh', 'damn', 'shit',
+  'ugh', 'sigh', 'damn', 'shit', 'lonely', 'regret', 'miss', 'lost', 'death',
   '讨厌', '烦', '生气', '愤怒', '难过', '伤心', '失望', '无聊', '糟糕',
   '唉', '哎', '烦死了', '受不了', '差劲', '垃圾',
+  '短暂', '去世', '死', '离开', '遗憾', '后悔', '孤独', '寂寞', '悲伤',
+  '流泪', '哭', '痛', '害怕', '担心', '不安', '迷茫',
 ];
 
 const DOMINANCE_UP_WORDS = [
@@ -40,10 +45,10 @@ const DOMINANCE_DOWN_WORDS = [
 ];
 
 /**
- * Emotion Engine: PAD-model emotion tracking with rule-based analysis.
+ * Emotion Engine: PAD-model emotion tracking with LLM semantic analysis.
  *
  * Only active in enhanced mode. Classic mode returns empty fragments.
- * Uses keyword/pattern matching (no LLM calls) to detect sentiment shifts.
+ * Uses LLM for semantic emotion analysis, with keyword/pattern matching as fallback.
  * Translates PAD state to indirect style hints in the prompt.
  */
 export class EmotionEngine implements Engine {
@@ -70,13 +75,13 @@ export class EmotionEngine implements Engine {
     const lastUpdate = this.lastUpdateTime.get(context.agentId) ?? Date.now();
     const elapsedHours = (Date.now() - lastUpdate) / 3_600_000;
 
-    const recovered = this.applyRecovery(current, baseline, elapsedHours);
+    const recovered = this.applyRecovery(current, baseline, elapsedHours, agent.card.emotion?.resilience);
     if (recovered !== current) {
       this.persistState(context.agentId, recovered);
       agent.emotionState = recovered;
     }
 
-    const intensityDial = agent.card.emotion?.intensityDial ?? 0.5;
+    const intensityDial = agent.card.emotion?.intensityDial ?? 0.8;
     const hints = this.translateToStyleHints(recovered, intensityDial);
     if (!hints) return [];
 
@@ -101,14 +106,18 @@ export class EmotionEngine implements Engine {
     const lastUpdate = this.lastUpdateTime.get(context.agentId) ?? 0;
     if (now - lastUpdate < this.config.emotion.minChangeInterval) return;
 
-    // Analyze emotion from user message + recent history
-    const delta = this.analyzeEmotion(
-      context.message.content,
-      context.conversationHistory.slice(-2),
-    );
+    // Try LLM semantic analysis first, fall back to keyword-based
+    const historySlice = [...context.conversationHistory.slice(-2), { content: response }];
+    let delta = await this.analyzeEmotionLLM(context.message.content, historySlice).catch(() => null);
+    let source: 'llm' | 'keyword' = 'llm';
+
+    if (!delta) {
+      delta = this.analyzeEmotion(context.message.content, historySlice);
+      source = 'keyword';
+    }
 
     // Apply delta with clamping
-    const intensityDial = agent.card.emotion?.intensityDial ?? 0.5;
+    const intensityDial = agent.card.emotion?.intensityDial ?? 0.8;
     const newState = this.applyDelta(agent.emotionState, delta, intensityDial);
 
     // Persist
@@ -121,7 +130,7 @@ export class EmotionEngine implements Engine {
       actor: `agent:${context.agentId}`,
       action: 'emotion.update',
       target: context.agentId,
-      details: { delta, newState },
+      details: { delta, newState, source },
     });
   }
 
@@ -174,9 +183,11 @@ export class EmotionEngine implements Engine {
     };
   }
 
-  applyRecovery(current: EmotionState, baseline: EmotionState, elapsedHours: number): EmotionState {
+  applyRecovery(current: EmotionState, baseline: EmotionState, elapsedHours: number, resilience?: number): EmotionState {
     if (elapsedHours <= 0) return current;
-    const rate = this.config.emotion.recoveryRate * elapsedHours;
+    // resilience scales recovery: 0 = very slow (0.2×), 1 = full speed (1×)
+    const resilienceFactor = 0.2 + 0.8 * (resilience ?? 0.5);
+    const rate = this.config.emotion.recoveryRate * resilienceFactor * elapsedHours;
 
     const drift = (cur: number, base: number) => {
       if (Math.abs(cur - base) < 0.01) return base;
@@ -217,6 +228,77 @@ export class EmotionEngine implements Engine {
     // Scale by intensity dial
     if (hints.length === 0 || intensityDial < 0.1) return '';
     return hints.join('\n');
+  }
+
+  // === LLM semantic analysis ===
+
+  private async analyzeEmotionLLM(
+    text: string,
+    history: { content: string }[],
+  ): Promise<EmotionState | null> {
+    const baseUrl = this.config.llm.openaiBaseUrl;
+    const apiKey = this.config.llm.openaiApiKey || this.config.llm.apiKey;
+    if (!baseUrl || !apiKey) return null;
+
+    const snippet = [text, ...history.map(h => h.content)].join('\n').slice(0, 800);
+    const endpoint = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.config.llm.openaiModel || this.config.llm.lightModel,
+        messages: [{
+          role: 'user',
+          content: `分析以下对话片段的情感变化，返回PAD情感模型的变化量（delta）。
+
+PAD模型说明：
+- pleasure（愉悦度）：-0.3 ~ +0.3，正值=开心/满足，负值=不快/沮丧
+- arousal（激活度）：-0.3 ~ +0.3，正值=兴奋/激动，负值=平静/低落
+- dominance（支配度）：-0.2 ~ +0.2，正值=用户主导/命令式，负值=用户谦逊/请求式
+
+注意：
+- 分析的是用户消息传达的情感倾向，不是AI回复的情感
+- 数值应反映情感强度，日常对话通常在±0.1以内
+- 中性对话返回接近0的值
+
+对话内容：
+"""
+${snippet}
+"""
+
+仅返回JSON，格式：{"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}`,
+        }],
+        max_tokens: 100,
+      }),
+    });
+
+    if (!resp.ok) return null;
+    const result = await resp.json() as any;
+    const raw = result.choices?.[0]?.message?.content || '';
+    return this.parsePADJson(raw);
+  }
+
+  private parsePADJson(raw: string): EmotionState | null {
+    const text = raw.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    try {
+      const parsed = JSON.parse(text);
+      if (
+        typeof parsed.pleasure === 'number' &&
+        typeof parsed.arousal === 'number' &&
+        typeof parsed.dominance === 'number'
+      ) {
+        return {
+          pleasure: Math.max(-0.3, Math.min(0.3, parsed.pleasure)),
+          arousal: Math.max(-0.3, Math.min(0.3, parsed.arousal)),
+          dominance: Math.max(-0.2, Math.min(0.2, parsed.dominance)),
+        };
+      }
+    } catch { /* fall through */ }
+    return null;
   }
 
   private clampPAD(value: number): number {
