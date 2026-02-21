@@ -82,6 +82,17 @@ export class MemoryStore {
         WHERE agent_id = ? AND source_message_id = ?
         LIMIT 1
       `),
+
+      getStats: this.db.prepare(`
+        SELECT type, COUNT(*) as count FROM memories
+        WHERE agent_id = ? AND faded_at IS NULL GROUP BY type
+      `),
+
+      getRecentAll: this.db.prepare(`
+        SELECT * FROM memories
+        WHERE agent_id = ? AND faded_at IS NULL
+        ORDER BY created_at DESC LIMIT ?
+      `),
     };
   }
 
@@ -148,6 +159,27 @@ export class MemoryStore {
       ...this.rowToMemory(r),
       embeddingBuf: r.embedding as Buffer,
     }));
+  }
+
+  /** Get memory type distribution stats for an agent */
+  getStats(agentId: string): Array<{ type: string; count: number }> {
+    return this.stmts.getStats.all(agentId) as Array<{ type: string; count: number }>;
+  }
+
+  /** Get recent memories with optional type and search filtering */
+  getRecentFiltered(agentId: string, limit = 50, type?: string, search?: string): Memory[] {
+    if (!type && !search) {
+      const rows = this.stmts.getRecentAll.all(agentId, limit) as any[];
+      return rows.map(r => this.rowToMemory(r));
+    }
+    let sql = 'SELECT * FROM memories WHERE agent_id = ? AND faded_at IS NULL';
+    const params: any[] = [agentId];
+    if (type) { sql += ' AND type = ?'; params.push(type); }
+    if (search) { sql += ' AND (content LIKE ? OR summary LIKE ? OR keywords LIKE ?)'; params.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+    sql += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map(r => this.rowToMemory(r));
   }
 
   findBySourceMessageId(agentId: string, sourceMessageId: string): Memory | null {

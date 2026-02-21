@@ -160,6 +160,21 @@ export class MemoryEngine implements Engine {
       .slice(0, limit);
   }
 
+  /** Get memory type distribution stats (for admin panel) */
+  getMemoryStats(agentId: string): Array<{ type: string; count: number }> {
+    return this.store.getStats(agentId);
+  }
+
+  /** Get entity relations for graph visualization (for admin panel) */
+  getEntityRelations(agentId: string, limit = 100): Array<{ source: string; relation: string; target: string; weight: number }> {
+    return this.graphRag.getAllRelations(agentId, limit);
+  }
+
+  /** Get recent memories with optional type/search filtering (for admin panel) */
+  getRecentMemoriesFiltered(agentId: string, limit = 50, type?: string, search?: string): Memory[] {
+    return this.store.getRecentFiltered(agentId, limit, type, search);
+  }
+
   /**
    * Format a retrieved memory for prompt injection.
    * Confidence level affects wording (from Lumi's feedback).

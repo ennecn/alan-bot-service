@@ -62,6 +62,12 @@ export class GraphRAG {
         UPDATE entity_relations SET weight = weight + 0.5
         WHERE agent_id = ? AND source_entity = ? AND relation = ? AND target_entity = ?
       `),
+
+      getAllRelations: this.db.prepare(`
+        SELECT source_entity, relation, target_entity, weight
+        FROM entity_relations WHERE agent_id = ?
+        ORDER BY weight DESC LIMIT ?
+      `),
     };
   }
 
@@ -98,6 +104,15 @@ export class GraphRAG {
       }
     }
     return [...related];
+  }
+
+  /** Get all entity relations for an agent (for admin panel visualization) */
+  getAllRelations(agentId: string, limit = 100): Array<{ source: string; relation: string; target: string; weight: number }> {
+    const rows = this.stmts.getAllRelations.all(agentId, limit) as any[];
+    return rows.map(r => ({
+      source: r.source_entity, relation: r.relation,
+      target: r.target_entity, weight: r.weight,
+    }));
   }
 
   /** Find memory IDs connected to given entities (for retrieval boost) */

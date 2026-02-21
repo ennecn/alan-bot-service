@@ -11,10 +11,23 @@ import { PromptCompiler } from './compiler/index.js';
 import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
 
+export interface LLMUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+interface LLMResult {
+  text: string;
+  usage?: LLMUsage;
+}
+
 export interface ChatResult {
   response: string;
   timing: { totalMs: number; llmMs: number; compileMs: number; postProcessMs: number };
   tokenUsage: { promptTokens: number; completionTokens: number };
+  usage?: LLMUsage;
+  voiceHint?: { emotion: string; intensity: number; speed: number };
   fragmentSummary: Array<{ source: string; tokens: number }>;
 }
 
@@ -144,7 +157,8 @@ export class Metroid {
     ];
 
     // Call LLM with fallback
-    const responseText = await this.callLLMWithFallback(compileResult.compiledPrompt, messages);
+    const llmResult = await this.callLLMWithFallback(compileResult.compiledPrompt, messages);
+    const responseText = llmResult.text;
     const t3 = performance.now();
 
     // Post-processing: let engines learn from the exchange
@@ -179,6 +193,7 @@ export class Metroid {
         promptTokens: compileResult.tokensUsed,
         completionTokens: Math.ceil(responseText.length / 3),
       },
+      usage: llmResult.usage,
       fragmentSummary,
     };
   }
@@ -187,7 +202,7 @@ export class Metroid {
   private async callLLMWithFallback(
     systemPrompt: string,
     messages: Anthropic.MessageParam[],
-  ): Promise<string> {
+  ): Promise<LLMResult> {
     if (this.config.llm.openaiBaseUrl) {
       return this.callOpenAICompatWithFallback(systemPrompt, messages);
     }
@@ -198,7 +213,7 @@ export class Metroid {
   private async callOpenAICompatWithFallback(
     systemPrompt: string,
     messages: Anthropic.MessageParam[],
-  ): Promise<string> {
+  ): Promise<LLMResult> {
     const primaryModel = this.config.llm.openaiModel || this.config.llm.mainModel;
     const fallbackModel = this.config.llm.openaiModelFallback;
     const timeoutMs = this.config.llm.requestTimeoutMs ?? 60_000;
@@ -226,7 +241,7 @@ export class Metroid {
     messages: Anthropic.MessageParam[],
     model: string,
     timeoutMs: number,
-  ): Promise<string> {
+  ): Promise<LLMResult> {
     const oaiMessages = [
       { role: 'system', content: systemPrompt },
       ...messages,
@@ -269,7 +284,15 @@ export class Metroid {
         throw err;
       }
 
-      return text;
+      // Extract usage from OpenAI-format response
+      const rawUsage = result.usage;
+      const usage: LLMUsage | undefined = rawUsage ? {
+        inputTokens: rawUsage.prompt_tokens ?? 0,
+        outputTokens: rawUsage.completion_tokens ?? 0,
+        totalTokens: rawUsage.total_tokens ?? (rawUsage.prompt_tokens ?? 0) + (rawUsage.completion_tokens ?? 0),
+      } : undefined;
+
+      return { text, usage };
     } finally {
       clearTimeout(timer);
     }
@@ -279,17 +302,23 @@ export class Metroid {
   private async callAnthropic(
     systemPrompt: string,
     messages: Anthropic.MessageParam[],
-  ): Promise<string> {
+  ): Promise<LLMResult> {
     const response = await this.client.messages.create({
       model: this.config.llm.mainModel,
       max_tokens: 4096,
       system: systemPrompt,
       messages,
     });
-    return response.content
+    const text = response.content
       .filter(c => c.type === 'text')
       .map(c => c.text)
       .join('');
+    const usage: LLMUsage | undefined = response.usage ? {
+      inputTokens: response.usage.input_tokens ?? 0,
+      outputTokens: response.usage.output_tokens ?? 0,
+      totalTokens: (response.usage.input_tokens ?? 0) + (response.usage.output_tokens ?? 0),
+    } : undefined;
+    return { text, usage };
   }
 
   /** Check if an error warrants fallback */
@@ -415,7 +444,8 @@ export class Metroid {
       { role: 'user' as const, content: `[系统提示] ${triggerPrompt}\n请以${agentName}的身份主动发一条消息给用户。保持自然，不要提及这是系统触发的。` },
     ];
 
-    return this.callLLMWithFallback(compiledPrompt, messages);
+    const result = await this.callLLMWithFallback(compiledPrompt, messages);
+    return result.text;
   }
 
   /** Register callback for proactive message push (used by WS adapter) */
@@ -496,6 +526,58 @@ export class Metroid {
   /** Get all growth changes including reverted ones */
   getAllGrowthChanges(agentId: string, limit = 50): BehavioralChange[] {
     return this.growth.getAllChanges(agentId, limit);
+  }
+
+  /** Revert a growth change by ID */
+  revertGrowthChange(agentId: string, changeId: string): boolean {
+    try {
+      this.growth.revertChange(changeId);
+      return true;
+    } catch { return false; }
+  }
+
+  /** Get memory type distribution stats */
+  getMemoryStats(agentId: string): Array<{ type: string; count: number }> {
+    return this.memory.getMemoryStats(agentId);
+  }
+
+  /** Get entity relations for graph visualization */
+  getEntityRelations(agentId: string, limit = 100): Array<{ source: string; relation: string; target: string; weight: number }> {
+    return this.memory.getEntityRelations(agentId, limit);
+  }
+
+  /** Get recent memories with filtering */
+  getRecentMemoriesFiltered(agentId: string, limit = 50, type?: string, search?: string): Memory[] {
+    return this.memory.getRecentMemoriesFiltered(agentId, limit, type, search);
+  }
+
+  /** Get emotion history from audit log */
+  getEmotionHistory(agentId: string, hours = 24): Array<{ timestamp: string; pleasure: number; arousal: number; dominance: number; userId?: string }> {
+    const rows = this.db.prepare(`
+      SELECT timestamp, details FROM audit_log
+      WHERE actor = ? AND action = 'emotion.update'
+        AND timestamp > datetime('now', ?)
+      ORDER BY timestamp ASC
+    `).all(`agent:${agentId}`, `-${hours} hours`) as any[];
+    return rows.map(r => {
+      const d = typeof r.details === 'string' ? JSON.parse(r.details) : r.details;
+      const s = d.newState || d;
+      return { timestamp: r.timestamp, pleasure: s.pleasure ?? 0, arousal: s.arousal ?? 0, dominance: s.dominance ?? 0, userId: d.userId };
+    });
+  }
+
+  /** Get list of users who have emotion states with this agent */
+  getEmotionUsers(agentId: string): Array<{ userId: string; state: any }> {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT json_extract(details, '$.userId') as userId
+      FROM audit_log
+      WHERE actor = ? AND action = 'emotion.update'
+        AND json_extract(details, '$.userId') IS NOT NULL
+    `).all(`agent:${agentId}`) as any[];
+    return rows.filter(r => r.userId).map(r => ({
+      userId: r.userId,
+      state: this.emotion.getState(agentId, r.userId),
+    }));
   }
 
   /** Graceful shutdown */

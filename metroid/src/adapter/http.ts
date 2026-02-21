@@ -42,6 +42,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '8100');
 const DATA_DIR = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
 const LOG_DIR = resolve(DATA_DIR, 'logs');
+const API_TOKEN = process.env.METROID_API_TOKEN || '';
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 
 // Ensure log directory exists
 mkdirSync(LOG_DIR, { recursive: true });
@@ -316,7 +318,16 @@ setInterval(() => {
 async function readBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', c => chunks.push(c));
+    let totalSize = 0;
+    req.on('data', (c: Buffer) => {
+      totalSize += c.length;
+      if (totalSize > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('body too large'));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
       try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
       catch { resolve({}); }
@@ -333,6 +344,48 @@ function json(res: ServerResponse, data: any, status = 200) {
 function error(res: ServerResponse, msg: string, status = 400) {
   json(res, { error: msg }, status);
 }
+
+/** Basic input sanitization: trim strings, enforce max length */
+function sanitize(input: string | undefined, maxLen = 10000): string {
+  if (!input || typeof input !== 'string') return '';
+  return input.trim().slice(0, maxLen);
+}
+
+// === Rate Limiting (sliding window) ===
+
+const rateLimits = {
+  mutation: { windowMs: 60_000, maxRequests: 60 },  // 60/min for POST
+  read: { windowMs: 60_000, maxRequests: 600 },     // 600/min for GET
+};
+
+const requestLog = new Map<string, number[]>(); // ip → timestamps
+
+function checkRateLimit(ip: string, type: 'mutation' | 'read'): boolean {
+  const config = rateLimits[type];
+  const now = Date.now();
+  const key = `${ip}:${type}`;
+  const timestamps = requestLog.get(key) ?? [];
+
+  // Remove expired entries
+  const cutoff = now - config.windowMs;
+  const valid = timestamps.filter(t => t > cutoff);
+
+  if (valid.length >= config.maxRequests) return false;
+
+  valid.push(now);
+  requestLog.set(key, valid);
+  return true;
+}
+
+// Clean up rate limit entries every 5 minutes
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [key, timestamps] of requestLog) {
+    const valid = timestamps.filter(t => t > cutoff);
+    if (valid.length === 0) requestLog.delete(key);
+    else requestLog.set(key, valid);
+  }
+}, 300_000);
 
 // === Route matching ===
 
@@ -519,6 +572,8 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
       growthChanges: growthCount,
       timing: result.timing,
       tokenUsage: result.tokenUsage,
+      usage: result.usage || null,
+      voiceHint: result.voiceHint || null,
       fragmentSummary: result.fragmentSummary,
     });
   } catch (err: any) {
@@ -526,16 +581,22 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
   }
 });
 
-route('GET', '/agents/:id/emotion', (_req, res, { id }) => {
-  const emotion = metroid.getEmotionState(id);
+route('GET', '/agents/:id/emotion', (req, res, { id }) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const userId = url.searchParams.get('userId') || undefined;
+  const emotion = metroid.getEmotionState(id, userId);
   if (!emotion) return error(res, 'agent not found', 404);
-  json(res, { emotion });
+  json(res, { emotion, userId: userId || null });
 });
 
 route('GET', '/agents/:id/memories', (req, res, { id }) => {
   const url = new URL(req.url!, `http://localhost`);
   const limit = parseInt(url.searchParams.get('limit') || '10');
-  const memories = metroid.getRecentMemories(id, limit);
+  const type = url.searchParams.get('type') || undefined;
+  const search = url.searchParams.get('search') || undefined;
+  const memories = (type || search)
+    ? metroid.getRecentMemoriesFiltered(id, limit, type, search)
+    : metroid.getRecentMemories(id, limit);
   json(res, {
     memories: memories.map(m => ({
       id: m.id, type: m.type,
@@ -734,6 +795,47 @@ route('GET', '/agents/:id/growth/all', (req, res, { id }) => {
   });
 });
 
+// === Admin Panel API ===
+
+route('GET', '/agents/:id/memories/stats', (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const stats = metroid.getMemoryStats(id);
+  json(res, { stats });
+});
+
+route('GET', '/agents/:id/entity-relations', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '100');
+  const relations = metroid.getEntityRelations(id, limit);
+  json(res, { relations });
+});
+
+route('GET', '/agents/:id/emotion/history', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const hours = parseInt(url.searchParams.get('hours') || '24');
+  const history = metroid.getEmotionHistory(id, hours);
+  json(res, { history });
+});
+
+route('GET', '/agents/:id/emotion/users', (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const users = metroid.getEmotionUsers(id);
+  json(res, { users });
+});
+
+route('POST', '/agents/:id/growth/:changeId/revert', (_req, res, { id, changeId }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const ok = metroid.revertGrowthChange(id, changeId);
+  json(res, { ok });
+});
+
 route('GET', '/debug/config', (_req, res) => {
   const llm = metroid.getLLMConfig();
   json(res, { llm });
@@ -776,13 +878,32 @@ const server = createServer(async (req, res) => {
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   // Serve web UI at root
   if (method === 'GET' && (url === '/' || url === '/index.html')) {
     serveStatic(res, resolve(__dirname, '../../public/index.html'), 'text/html; charset=utf-8');
+    return;
+  }
+
+  // API token auth (skip for health and static)
+  if (API_TOKEN && url !== '/health') {
+    const auth = req.headers['authorization'];
+    if (!auth || auth !== `Bearer ${API_TOKEN}`) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+  }
+
+  // Rate limiting
+  const clientIp = (req.socket.remoteAddress || '127.0.0.1');
+  const limitType = (method === 'POST' || method === 'PUT' || method === 'DELETE') ? 'mutation' : 'read';
+  if (!checkRateLimit(clientIp, limitType)) {
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
+    res.end(JSON.stringify({ error: 'rate limit exceeded' }));
     return;
   }
 
