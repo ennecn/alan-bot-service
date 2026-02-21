@@ -2,6 +2,30 @@
 
 ## 版本: v0.3.0
 
+## 代码同步记录
+
+### 2026-02-21 Mac Mini → Windows 同步
+- 源: Mac Mini `/Users/fangjin/metroid-local/` (主开发环境)
+- 目标: Windows `D:\openclawVPS\metroid\` (git 仓库) + NAS `Z:\openclawVPS\metroid\` (备份)
+- Git commit: `80aeed3`
+- 分支 `metroid-admin-panel` (c2c5c3f) 保留了 Windows 独有功能:
+  - Debug console admin panel (Dashboard/Emotions/Memories/Growth 4 tabs)
+  - Rate limiting (滑动窗口限流)
+  - Input sanitization + body size 限制
+  - API token 认证
+  - 6 个管理 API 端点 (memory stats, entity relations, emotion history/users, growth revert)
+- 这些功能后续需合并回 master
+
+### 开发环境
+| 环境 | 路径 | 用途 |
+|------|------|------|
+| Mac Mini | `/Users/fangjin/metroid-local/` | 主开发 + 运行测试 |
+| Windows | `D:\openclawVPS\metroid\` | Git 仓库 + Claude Code 开发 |
+| NAS (Z:) | `Z:\openclawVPS\metroid\` | 备份 |
+| Mac NAS mount | `/Users/fangjin/nas/openclawVPS/metroid/` | Mac 访问 NAS |
+
+---
+
 ## 已完成 ✅
 
 ### Phase 1: 记忆 MVP
@@ -30,17 +54,35 @@
 - Conversation Engine — 多 Agent 轮次调度 + 共享历史 ✅
 - Social Engine — agent↔agent 关系管理 + 亲密度 ✅
 - 双模型故障降级 — primary + fallback 自动切换 ✅
-- HTTP REST API — 完整端点 + Bearer 认证 + 限流 ✅
+- HTTP REST API — 完整端点 ✅
 - WebSocket — 实时推送 ✅
 - 审计日志 — append-only ✅
 - ST Card V2 PNG 导入 ✅
 - 记忆快照导出/导入 ✅
 
+### Mac Mini 开发成果 (2026-02-16 ~ 02-20)
+- OpenAI 兼容 API (SiliconFlow/DeepSeek-V3/Qwen2.5-72B)
+- rpMode 三级 RP 指令 (off/sfw/nsfw)
+- Emotion Engine 修复: PAD 全 0 问题, 中文正负面关键词扩展, onResponse 分析 LLM 回复, intensityDial 0.5→0.8
+- Growth Engine 修复: 中文短消息阈值 20→10, CJK 字符段分词, 疑问句频率检测 (Pattern 5)
+- LLM 语义分析: emotion + growth 引擎均支持 LLM 替代关键词匹配
+- 用户身份修复: EngineContext 新增 userName, baseSystemPrompt 加入身份锚定
+- Debug Clock: advanceTime/resetClock 支持时间旅行测试 impulse 系统
+- Web-IM adapter: 手写 WebSocket (零依赖)
+- ST vs Metroid 对比测试框架 (芙莉莲角色卡, 5 轮对话)
+
 ### 基础设施
-- 159 tests / 13 files, 100% 通过
-- Vitest 测试框架
+- 13 test files, Vitest 框架
 - SQLite (better-sqlite3) 存储
 - TypeScript 全量类型
+- 代码量: ~3785 行核心代码 (src/)
+
+### 测试现状 (2026-02-21)
+| 状态 | 数量 | 说明 |
+|------|------|------|
+| Passed | 83 | 核心引擎测试 |
+| Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
+| Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
 ---
 
@@ -55,8 +97,17 @@
 | 3 | Social Engine Layer 1 补全 | P1 | @mention 识别 + 共享 public 记忆 |
 | 4 | 权限分级 | P2 | user/agent/admin 三级权限 |
 | 5 | 回滚机制 + UI | P2 | 基于审计日志的状态回滚 |
-| 6 | 管理面板 | P2 | 记忆/情绪/成长可视化 |
+| 6 | 管理面板 | P2 | 记忆/情绪/成长可视化 (已有原型在 metroid-admin-panel 分支) |
 | 7 | Discord Adapter | P3 | 多 Channel 支持 |
+
+### 安全功能 (需从 metroid-admin-panel 分支合并)
+
+| 项目 | 说明 |
+|------|------|
+| Rate Limiting | 滑动窗口限流 (60/min mutation, 600/min read) |
+| Input Sanitization | 字符串 trim + maxLen 截断 |
+| Body Size Limit | 1MB 请求体限制 |
+| API Token Auth | Bearer token 认证 |
 
 ### VibeCreature 对接 (TASK-vibecreature-integration.md)
 
@@ -74,11 +125,13 @@
 
 | 项目 | 说明 |
 |------|------|
+| Proactive Engine 测试 | 触发器 + impulse 零覆盖 (679 行代码无测试) |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
-| Proactive Engine 测试 | 触发器 + impulse 无测试 |
 | Social Engine 测试 | 关系更新无测试 |
 | Memory 隐私执行 | schema 支持 3 级隐私，引擎未执行访问控制 |
+| forgetter bug | NOT NULL 约束冲突 (updateImportance SQL 参数顺序) |
+| growth bug | 行为检测断言失败 (changes.length = 0) |
 
 ### 远期 (需求驱动)
 
