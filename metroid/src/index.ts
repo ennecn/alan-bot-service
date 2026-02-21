@@ -31,6 +31,32 @@ export interface ChatResult {
   fragmentSummary: Array<{ source: string; tokens: number }>;
 }
 
+export interface CompareResult {
+  id: string;
+  timestamp: string;
+  message: string;
+  classic: {
+    fragments: PromptFragment[];
+    compiledPrompt: string;
+    tokensUsed: number;
+    response?: string;
+    timing: { compileMs: number; llmMs?: number };
+  };
+  enhanced: {
+    fragments: PromptFragment[];
+    compiledPrompt: string;
+    tokensUsed: number;
+    response?: string;
+    timing: { compileMs: number; llmMs?: number };
+  };
+  judge?: {
+    classicScore: number;
+    enhancedScore: number;
+    dimensions: Record<string, { classic: number; enhanced: number }>;
+    reasoning: string;
+  };
+}
+
 export class Metroid {
   private db;
   private audit: AuditLog;
@@ -492,6 +518,140 @@ export class Metroid {
       tokenBudget: result.tokenBudget,
       tokensUsed: result.tokensUsed,
     };
+  }
+
+  /** Compare classic vs enhanced prompt compilation + optional LLM calls + judge */
+  async compareChat(
+    agentId: string,
+    message: MetroidMessage,
+    history: MetroidMessage[],
+    options: { callLLM?: boolean; judge?: boolean } = {},
+  ): Promise<CompareResult> {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+
+    const agentName = agent.card.name ?? agent.name;
+    const userName = message.author.name || '用户';
+    const basePrompt = this.buildBasePrompt(agentName, userName, agent.card.rpMode);
+    const originalMode = agent.mode;
+
+    const context = (mode: AgentMode): EngineContext => ({
+      agentId, mode, message, conversationHistory: history, userName,
+    });
+
+    const messages: Anthropic.MessageParam[] = [
+      ...history.map(m => ({
+        role: (m.author.isBot ? 'assistant' : 'user') as 'user' | 'assistant',
+        content: m.content,
+      })),
+      { role: 'user' as const, content: message.content },
+    ];
+
+    // Classic compilation
+    this.identity.setMode(agentId, 'classic');
+    const ct0 = performance.now();
+    const classicResult = await this.compiler.compileWithDetails(basePrompt, context('classic'));
+    const ct1 = performance.now();
+
+    // Enhanced compilation
+    this.identity.setMode(agentId, 'enhanced');
+    const et0 = performance.now();
+    const enhancedResult = await this.compiler.compileWithDetails(basePrompt, context('enhanced'));
+    const et1 = performance.now();
+
+    // Restore original mode
+    this.identity.setMode(agentId, originalMode);
+
+    const result: CompareResult = {
+      id: `cmp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      message: message.content,
+      classic: {
+        fragments: classicResult.fragments,
+        compiledPrompt: classicResult.compiledPrompt,
+        tokensUsed: classicResult.tokensUsed,
+        timing: { compileMs: Math.round(ct1 - ct0) },
+      },
+      enhanced: {
+        fragments: enhancedResult.fragments,
+        compiledPrompt: enhancedResult.compiledPrompt,
+        tokensUsed: enhancedResult.tokensUsed,
+        timing: { compileMs: Math.round(et1 - et0) },
+      },
+    };
+
+    // Optional LLM calls
+    if (options.callLLM) {
+      const lt0 = performance.now();
+      const classicLLM = await this.callLLMWithFallback(classicResult.compiledPrompt, messages);
+      const lt1 = performance.now();
+      result.classic.response = classicLLM.text;
+      result.classic.timing.llmMs = Math.round(lt1 - lt0);
+
+      const lt2 = performance.now();
+      const enhancedLLM = await this.callLLMWithFallback(enhancedResult.compiledPrompt, messages);
+      const lt3 = performance.now();
+      result.enhanced.response = enhancedLLM.text;
+      result.enhanced.timing.llmMs = Math.round(lt3 - lt2);
+
+      // Optional judge
+      if (options.judge && result.classic.response && result.enhanced.response) {
+        result.judge = await this.judgeResponses(
+          message.content, result.classic.response, result.enhanced.response, agentName,
+        );
+      }
+    }
+
+    return result;
+  }
+
+  /** Use LLM to judge quality of two responses */
+  private async judgeResponses(
+    userMessage: string, classicReply: string, enhancedReply: string, agentName: string,
+  ): Promise<CompareResult['judge']> {
+    const judgePrompt = `You are a quality evaluator for AI character responses. Score each response on a 1-10 scale across these dimensions:
+- character_consistency: How well does the response stay in character as ${agentName}?
+- emotional_depth: How rich and nuanced are the emotions expressed?
+- context_usage: How well does the response use available context?
+- naturalness: How natural and human-like is the response?
+- creativity: How creative and engaging is the response?
+
+User message: "${userMessage}"
+
+Response A (classic mode):
+${classicReply}
+
+Response B (enhanced mode):
+${enhancedReply}
+
+Reply in JSON only:
+{"dimensions":{"character_consistency":{"classic":N,"enhanced":N},"emotional_depth":{"classic":N,"enhanced":N},"context_usage":{"classic":N,"enhanced":N},"naturalness":{"classic":N,"enhanced":N},"creativity":{"classic":N,"enhanced":N}},"reasoning":"brief explanation"}`;
+
+    try {
+      const result = await this.callLLMWithFallback(
+        'You are a response quality evaluator. Reply with valid JSON only, no markdown.',
+        [{ role: 'user', content: judgePrompt }],
+      );
+      const parsed = JSON.parse(result.text.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      const dims = parsed.dimensions || {};
+      let classicTotal = 0, enhancedTotal = 0, count = 0;
+      for (const d of Object.values(dims) as Array<{ classic: number; enhanced: number }>) {
+        classicTotal += d.classic || 0;
+        enhancedTotal += d.enhanced || 0;
+        count++;
+      }
+      return {
+        classicScore: count ? Math.round(classicTotal / count * 10) / 10 : 0,
+        enhancedScore: count ? Math.round(enhancedTotal / count * 10) / 10 : 0,
+        dimensions: dims,
+        reasoning: parsed.reasoning || '',
+      };
+    } catch (err: any) {
+      return {
+        classicScore: 0, enhancedScore: 0, dimensions: {},
+        reasoning: `Judge failed: ${err.message}`,
+      };
+    }
   }
 
   /** Get sanitized LLM config */

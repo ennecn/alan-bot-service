@@ -34,7 +34,7 @@ import { createHash } from 'crypto';
 import { resolve, dirname } from 'path';
 import { readFileSync, mkdirSync, appendFileSync, readdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { Metroid, ChatResult } from '../index.js';
+import { Metroid, ChatResult, CompareResult } from '../index.js';
 import type { MetroidMessage, AgentMode, ProactiveMessage } from '../types.js';
 import type { Socket } from 'net';
 
@@ -839,6 +839,86 @@ route('POST', '/agents/:id/growth/:changeId/revert', (_req, res, { id, changeId 
 route('GET', '/debug/config', (_req, res) => {
   const llm = metroid.getLLMConfig();
   json(res, { llm });
+});
+
+// === Compare Test Storage ===
+
+const compareResults = new Map<string, CompareResult>();
+const MAX_COMPARE_RESULTS = 100;
+
+function storeCompareResult(result: CompareResult): void {
+  compareResults.set(result.id, result);
+  // Evict oldest if over limit
+  if (compareResults.size > MAX_COMPARE_RESULTS) {
+    const oldest = compareResults.keys().next().value;
+    if (oldest) compareResults.delete(oldest);
+  }
+  // Persist to JSONL
+  const logFile = resolve(LOG_DIR, 'compare-results.jsonl');
+  appendFileSync(logFile, JSON.stringify(result) + '\n');
+}
+
+// === Compare Test Endpoints ===
+
+route('POST', '/agents/:id/test/compare', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (!body.content) return error(res, 'content required');
+
+  const userMsg: MetroidMessage = {
+    id: `cmp-msg-${++msgCounter}-${Date.now()}`,
+    channel: 'web-im',
+    author: { id: body.userId || 'test-user', name: body.userName || '用户', isBot: false },
+    content: body.content,
+    timestamp: Date.now(),
+  };
+
+  const history: MetroidMessage[] = (body.history || []).map((h: any, i: number) => ({
+    id: `cmp-hist-${i}`,
+    channel: 'web-im' as const,
+    author: {
+      id: h.isBot ? agent.id : (body.userId || 'test-user'),
+      name: h.isBot ? agent.name : (body.userName || '用户'),
+      isBot: !!h.isBot,
+    },
+    content: h.content,
+    timestamp: Date.now() - ((body.history?.length || 0) - i) * 1000,
+  }));
+
+  try {
+    const result = await metroid.compareChat(id, userMsg, history, {
+      callLLM: !!body.callLLM,
+      judge: !!body.judge,
+    });
+    storeCompareResult(result);
+    json(res, result);
+  } catch (err: any) {
+    error(res, `compare failed: ${err.message}`, 500);
+  }
+});
+
+route('GET', '/test/results', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '20');
+  const results = [...compareResults.values()].reverse().slice(0, limit);
+  json(res, {
+    results: results.map(r => ({
+      id: r.id,
+      timestamp: r.timestamp,
+      message: r.message.slice(0, 60),
+      classicTokens: r.classic.tokensUsed,
+      enhancedTokens: r.enhanced.tokensUsed,
+      hasResponses: !!(r.classic.response && r.enhanced.response),
+      judgeScore: r.judge ? { classic: r.judge.classicScore, enhanced: r.judge.enhancedScore } : null,
+    })),
+  });
+});
+
+route('GET', '/test/results/:id', (_req, res, { id }) => {
+  const result = compareResults.get(id);
+  if (!result) return error(res, 'result not found', 404);
+  json(res, result);
 });
 
 // === Server ===

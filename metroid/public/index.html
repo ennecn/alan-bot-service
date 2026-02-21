@@ -161,6 +161,44 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; 
 .mem-right { width: 340px; border-left: 1px solid #30363d; display: flex; flex-direction: column; overflow: hidden; }
 .mem-right h4 { font-size: 12px; color: #8b949e; padding: 8px 12px; text-transform: uppercase; border-bottom: 1px solid #30363d; flex-shrink: 0; }
 .graph-canvas { flex: 1; }
+/* === Test Tab Styles === */
+.test-panel { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.test-toolbar { display: flex; gap: 8px; padding: 10px 12px; background: #161b22; border-bottom: 1px solid #30363d; align-items: center; flex-shrink: 0; }
+.test-toolbar input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 13px; }
+.test-toolbar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.test-toolbar button:hover { background: #30363d; }
+.test-toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+.test-quick { display: flex; align-items: center; gap: 4px; padding: 4px 12px; background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+.test-columns { display: flex; flex: 1; overflow-y: auto; gap: 1px; background: #30363d; }
+.test-col { flex: 1; background: #0d1117; display: flex; flex-direction: column; overflow-y: auto; padding: 10px; }
+.test-col-header { font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; text-align: center; letter-spacing: 1px; }
+.test-frags { flex-shrink: 0; }
+.test-frag-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; margin-bottom: 2px; }
+.test-frag-item:hover { background: #161b22; }
+.test-frag-item .frag-name { font-weight: 600; }
+.test-frag-item .frag-tok { color: #8b949e; font-size: 11px; }
+.test-frag-content { display: none; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; margin: 2px 0 6px; max-height: 200px; overflow-y: auto; color: #8b949e; }
+.test-frag-item.expanded + .test-frag-content { display: block; }
+.test-total { font-size: 12px; color: #8b949e; padding: 4px 8px; border-top: 1px solid #21262d; margin-top: 4px; }
+.test-prompt-toggle { font-size: 11px; color: #58a6ff; cursor: pointer; padding: 4px 8px; margin-top: 4px; }
+.test-prompt-toggle:hover { text-decoration: underline; }
+.test-prompt { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; color: #8b949e; margin-top: 4px; }
+.test-response { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.test-response-header { font-size: 11px; color: #8b949e; margin-bottom: 4px; display: flex; justify-content: space-between; }
+.test-response-text { color: #c9d1d9; }
+.test-continue-btn { background: #21262d; color: #58a6ff; border: 1px solid #30363d; border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; margin-top: 6px; }
+.test-continue-btn:hover { background: #30363d; }
+.test-judge { background: #161b22; border-top: 1px solid #30363d; padding: 10px 12px; font-size: 13px; flex-shrink: 0; }
+.test-judge-scores { display: flex; gap: 16px; margin-bottom: 6px; }
+.test-judge-dim { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.test-judge-dim span { background: #21262d; padding: 2px 8px; border-radius: 4px; }
+.test-history-bar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #161b22; border-top: 1px solid #30363d; flex-shrink: 0; overflow-x: auto; }
+.test-history { display: flex; gap: 4px; }
+.test-history button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.test-history button:hover { background: #30363d; }
+.test-history button.active { border-color: #58a6ff; color: #58a6ff; }
+.test-placeholder { color: #8b949e; font-size: 12px; padding: 20px; text-align: center; }
+.test-loading { color: #f0883e; font-size: 12px; padding: 20px; text-align: center; }
 </style>
 </head>
 <body>
@@ -181,6 +219,7 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; 
 <div class="tab-bar">
   <button data-tab="dashboard">Dashboard</button>
   <button class="active" data-tab="chat">Chat</button>
+  <button data-tab="test">Test</button>
   <button data-tab="inspector">Inspector</button>
   <button data-tab="config">Config</button>
   <button data-tab="emotions">Emotions</button>
@@ -199,6 +238,43 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; 
     <div class="input-bar">
       <input id="chatInput" placeholder="Type a message..." autocomplete="off">
       <button id="sendBtn" disabled>Send</button>
+    </div>
+  </div>
+
+  <!-- Test Tab -->
+  <div class="tab-panel" id="tab-test">
+    <div class="test-panel">
+      <div class="test-toolbar">
+        <input id="testInput" placeholder="Enter test message..." autocomplete="off" style="flex:1;">
+        <button id="testCompareBtn" onclick="runCompare(false)">Compare Prompts</button>
+        <button id="testLLMBtn" onclick="runCompare(true)" style="background:#238636;color:#fff;">Compare + LLM</button>
+        <label style="font-size:12px;display:flex;align-items:center;gap:4px;color:#8b949e;"><input type="checkbox" id="testJudge"> Judge</label>
+      </div>
+      <div class="test-quick">
+        <span style="font-size:11px;color:#8b949e;margin-right:4px;">Quick:</span>
+        <div class="quick-tests" id="testQuickTests"></div>
+      </div>
+      <div class="test-columns" id="testColumns">
+        <div class="test-col">
+          <div class="test-col-header mode-classic">CLASSIC</div>
+          <div class="test-frags" id="testClassicFrags"><div class="test-placeholder">Run a comparison to see results</div></div>
+          <div class="test-prompt-toggle" id="testClassicPromptToggle" style="display:none;" onclick="toggleTestPrompt('classic')">View Prompt</div>
+          <pre class="test-prompt" id="testClassicPrompt" style="display:none;"></pre>
+          <div class="test-response" id="testClassicResponse" style="display:none;"></div>
+        </div>
+        <div class="test-col">
+          <div class="test-col-header mode-enhanced">ENHANCED</div>
+          <div class="test-frags" id="testEnhancedFrags"><div class="test-placeholder">Run a comparison to see results</div></div>
+          <div class="test-prompt-toggle" id="testEnhancedPromptToggle" style="display:none;" onclick="toggleTestPrompt('enhanced')">View Prompt</div>
+          <pre class="test-prompt" id="testEnhancedPrompt" style="display:none;"></pre>
+          <div class="test-response" id="testEnhancedResponse" style="display:none;"></div>
+        </div>
+      </div>
+      <div class="test-judge" id="testJudgeResult" style="display:none;"></div>
+      <div class="test-history-bar">
+        <span style="font-size:11px;color:#8b949e;">History:</span>
+        <div class="test-history" id="testHistory"></div>
+      </div>
     </div>
   </div>
 
@@ -1117,11 +1193,186 @@ function drawEntityGraph(relations) {
   ctx.textAlign='start';
 }
 
+// === Test Tab ===
+let testResults = [];
+let activeTestId = null;
+
+function initTestQuickTests() {
+  const container = document.getElementById('testQuickTests');
+  for (const t of quickTests) {
+    const btn = document.createElement('button');
+    btn.textContent = t.label;
+    btn.onclick = () => { document.getElementById('testInput').value = t.text; };
+    container.appendChild(btn);
+  }
+  document.getElementById('testInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runCompare(false); }
+  });
+}
+
+async function runCompare(callLLM) {
+  const text = document.getElementById('testInput').value.trim();
+  if (!text || !currentAgentId) return;
+  const judge = document.getElementById('testJudge').checked;
+
+  document.getElementById('testCompareBtn').disabled = true;
+  document.getElementById('testLLMBtn').disabled = true;
+  document.getElementById('testClassicFrags').innerHTML = '<div class="test-loading">Comparing...</div>';
+  document.getElementById('testEnhancedFrags').innerHTML = '<div class="test-loading">Comparing...</div>';
+  document.getElementById('testClassicResponse').style.display = 'none';
+  document.getElementById('testEnhancedResponse').style.display = 'none';
+  document.getElementById('testJudgeResult').style.display = 'none';
+  document.getElementById('testClassicPromptToggle').style.display = 'none';
+  document.getElementById('testEnhancedPromptToggle').style.display = 'none';
+  document.getElementById('testClassicPrompt').style.display = 'none';
+  document.getElementById('testEnhancedPrompt').style.display = 'none';
+
+  try {
+    const res = await fetch(API + '/agents/' + currentAgentId + '/test/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text, callLLM, judge }),
+    });
+    const data = await res.json();
+    if (data.id) {
+      testResults.push(data);
+      activeTestId = data.id;
+      renderTestResult(data);
+      addTestHistoryBtn(data);
+    } else {
+      document.getElementById('testClassicFrags').innerHTML = '<div class="test-placeholder">Error: ' + escHtml(data.error || 'unknown') + '</div>';
+      document.getElementById('testEnhancedFrags').innerHTML = '';
+    }
+  } catch (e) {
+    document.getElementById('testClassicFrags').innerHTML = '<div class="test-placeholder">Error: ' + escHtml(e.message) + '</div>';
+    document.getElementById('testEnhancedFrags').innerHTML = '';
+  }
+  document.getElementById('testCompareBtn').disabled = false;
+  document.getElementById('testLLMBtn').disabled = false;
+}
+
+function renderTestResult(data) {
+  renderTestFrags('testClassicFrags', data.classic);
+  renderTestFrags('testEnhancedFrags', data.enhanced);
+
+  document.getElementById('testClassicPrompt').textContent = data.classic.compiledPrompt;
+  document.getElementById('testEnhancedPrompt').textContent = data.enhanced.compiledPrompt;
+  document.getElementById('testClassicPromptToggle').style.display = '';
+  document.getElementById('testEnhancedPromptToggle').style.display = '';
+  document.getElementById('testClassicPrompt').style.display = 'none';
+  document.getElementById('testEnhancedPrompt').style.display = 'none';
+
+  if (data.classic.response) {
+    renderTestResponse('testClassicResponse', data.classic, data.message);
+  } else {
+    document.getElementById('testClassicResponse').style.display = 'none';
+  }
+  if (data.enhanced.response) {
+    renderTestResponse('testEnhancedResponse', data.enhanced, data.message);
+  } else {
+    document.getElementById('testEnhancedResponse').style.display = 'none';
+  }
+
+  if (data.judge) {
+    renderTestJudge(data.judge);
+  } else {
+    document.getElementById('testJudgeResult').style.display = 'none';
+  }
+}
+
+function renderTestFrags(containerId, side) {
+  const el = document.getElementById(containerId);
+  let html = '';
+  const fragMap = {};
+  for (const f of side.fragments) {
+    if (!fragMap[f.source]) fragMap[f.source] = { tokens: 0, items: [] };
+    fragMap[f.source].tokens += f.tokens;
+    fragMap[f.source].items.push(f);
+  }
+  for (const [source, group] of Object.entries(fragMap)) {
+    const srcClass = 'src-' + source;
+    for (const f of group.items) {
+      const fragId = containerId + '-' + source + '-' + Math.random().toString(36).slice(2,6);
+      html += '<div class="test-frag-item" onclick="this.classList.toggle(\'expanded\')" data-fid="' + fragId + '">';
+      html += '<span class="frag-name ' + srcClass + '">' + escHtml(source) + '</span>';
+      html += '<span class="frag-tok">' + f.tokens + ' tok (pri ' + f.priority + ')' + (f.required ? ' REQ' : '') + '</span>';
+      html += '</div>';
+      html += '<div class="test-frag-content">' + escHtml(f.content) + '</div>';
+    }
+  }
+  html += '<div class="test-total">Total: ' + side.tokensUsed + ' tokens | Compile: ' + side.timing.compileMs + 'ms';
+  if (side.timing.llmMs !== undefined) html += ' | LLM: ' + (side.timing.llmMs / 1000).toFixed(1) + 's';
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function renderTestResponse(containerId, side, userMessage) {
+  const el = document.getElementById(containerId);
+  el.style.display = '';
+  const timingStr = side.timing.llmMs ? (side.timing.llmMs / 1000).toFixed(1) + 's' : '';
+  const tokStr = Math.ceil(side.response.length / 3) + ' tok';
+  el.innerHTML = '<div class="test-response-header"><span>LLM Response</span><span>' + timingStr + ' / ' + tokStr + '</span></div>'
+    + '<div class="test-response-text">' + escHtml(side.response) + '</div>'
+    + '<button class="test-continue-btn" onclick="continueInChat(\'' + escHtml(userMessage).replace(/'/g, "\\'") + '\',\'' + escHtml(side.response).replace(/'/g, "\\'") + '\')">Continue in Chat</button>';
+}
+
+function renderTestJudge(judge) {
+  const el = document.getElementById('testJudgeResult');
+  el.style.display = '';
+  const diff = (judge.enhancedScore - judge.classicScore).toFixed(1);
+  const winner = diff > 0 ? 'Enhanced' : diff < 0 ? 'Classic' : 'Tie';
+  const diffStr = diff > 0 ? '+' + diff : diff;
+  let html = '<div class="test-judge-scores">';
+  html += '<span style="color:#58a6ff">Classic: <b>' + judge.classicScore + '</b></span>';
+  html += '<span style="color:#3fb950">Enhanced: <b>' + judge.enhancedScore + '</b></span>';
+  html += '<span style="color:#f0883e">' + winner + ' ' + diffStr + '</span>';
+  html += '</div>';
+  html += '<div class="test-judge-dim">';
+  for (const [dim, scores] of Object.entries(judge.dimensions)) {
+    const label = dim.replace(/_/g, ' ');
+    html += '<span>' + label + ': ' + scores.classic + '/' + scores.enhanced + '</span>';
+  }
+  html += '</div>';
+  if (judge.reasoning) html += '<div style="font-size:11px;color:#8b949e;margin-top:4px;">' + escHtml(judge.reasoning) + '</div>';
+  el.innerHTML = html;
+}
+
+function toggleTestPrompt(side) {
+  const el = document.getElementById('test' + side.charAt(0).toUpperCase() + side.slice(1) + 'Prompt');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+function continueInChat(userMsg, botReply) {
+  chatHistory.push({ content: userMsg, isBot: false });
+  chatHistory.push({ content: botReply, isBot: true });
+  addUserMsg(userMsg);
+  addBotMsg(botReply);
+  switchTab('chat');
+}
+
+function addTestHistoryBtn(data) {
+  const container = document.getElementById('testHistory');
+  const btn = document.createElement('button');
+  const label = data.message.slice(0, 15) + (data.message.length > 15 ? '...' : '');
+  btn.textContent = label;
+  btn.title = data.message;
+  btn.onclick = () => {
+    container.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeTestId = data.id;
+    renderTestResult(data);
+  };
+  btn.classList.add('active');
+  container.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  container.appendChild(btn);
+}
+
 // === Init ===
 async function init() {
   await loadAgents();
   wsConnect();
   initQuickTests();
+  initTestQuickTests();
   // Load clock offset
   try {
     const res = await fetch(API + '/debug/clock');
