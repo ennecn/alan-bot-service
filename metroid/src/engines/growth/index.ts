@@ -92,11 +92,9 @@ export class GrowthEngine implements Engine {
     // Evaluate at interval
     if (counter >= this.config.growth.evaluationInterval) {
       this.messageCounters.set(agentId, 0);
-      try {
-        await this.evaluateGrowth(agentId, recent);
-      } catch (err: any) {
-        console.error('[GrowthEngine] evaluation failed:', err.message || err);
-      }
+      this.evaluateGrowth(agentId, recent).catch(err =>
+        console.error('[GrowthEngine] evaluation failed:', err.message || err)
+      );
     }
   }
 
@@ -158,56 +156,6 @@ export class GrowthEngine implements Engine {
 
       this.applyChange(agentId, pattern);
     }
-
-    // Sync high-confidence behavioral changes to identity traits
-    this.syncToIdentity(agentId);
-  }
-
-  /**
-   * Sync high-confidence behavioral changes to Identity mutable traits.
-   * When a behavioral adaptation has confidence > 0.8, derive a personality
-   * trait and update the Identity engine.
-   */
-  private syncToIdentity(agentId: string): void {
-    const changes = this.getActiveChanges(agentId);
-    const highConfidence = changes.filter(c => c.confidence >= 0.8);
-
-    for (const change of highConfidence) {
-      const trait = this.adaptationToTrait(change.adaptation);
-      if (trait) {
-        this.identity.updateTrait(agentId, trait.name, trait.delta);
-      }
-    }
-  }
-
-  /** Map a behavioral adaptation to a personality trait adjustment */
-  private adaptationToTrait(adaptation: string): { name: string; delta: number } | null {
-    const lower = adaptation.toLowerCase();
-
-    // Conciseness / verbosity
-    if (lower.includes('简洁') || lower.includes('concise') || lower.includes('shorter')) {
-      return { name: '简洁', delta: 0.1 };
-    }
-    if (lower.includes('详细') || lower.includes('detail') || lower.includes('elaborate')) {
-      return { name: '详细', delta: 0.1 };
-    }
-
-    // Attentiveness
-    if (lower.includes('澄清') || lower.includes('理解') || lower.includes('意图') || lower.includes('careful')) {
-      return { name: '细心', delta: 0.1 };
-    }
-
-    // Curiosity engagement
-    if (lower.includes('好奇') || lower.includes('延伸') || lower.includes('背景') || lower.includes('curious')) {
-      return { name: '好奇心引导', delta: 0.1 };
-    }
-
-    // Topic interest
-    if (lower.includes('感兴趣') || lower.includes('主动展开') || lower.includes('interest')) {
-      return { name: '话题敏感', delta: 0.05 };
-    }
-
-    return null;
   }
 
   detectPatterns(messages: string[]): DetectedPattern[] {

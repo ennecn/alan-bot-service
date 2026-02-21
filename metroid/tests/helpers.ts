@@ -16,7 +16,7 @@ export function createTestDb(): Database.Database {
 
 /** Insert a test agent and return its id */
 export function createTestAgent(db: Database.Database, name = 'test-agent'): string {
-  const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = `agent-${Date.now()}`;
   db.prepare(
     `INSERT INTO agents (id, name, card_json) VALUES (?, ?, '{}')`
   ).run(id, name);

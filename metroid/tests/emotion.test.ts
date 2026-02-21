@@ -8,7 +8,7 @@ import type Database from 'better-sqlite3';
 
 const testConfig = {
   dataDir: ':memory:', dbPath: ':memory:',
-  memory: { importanceThreshold: 0.4, fadeThreshold: 0.3, maxRetrievalResults: 5, defaultTimeWindowHours: 72 },
+  memory: { encodingSampleRate: 0.3, importanceThreshold: 0.4, fadeThreshold: 0.3, maxRetrievalResults: 5, defaultTimeWindowHours: 72 },
   llm: { apiKey: 'test', mainModel: 'test', lightModel: 'test', maxContextTokens: 200_000 },
   compiler: { responseReserveRatio: 0.3 },
   emotion: { minChangeInterval: 30_000, maxChangePerUpdate: 0.3, recoveryRate: 0.05 },

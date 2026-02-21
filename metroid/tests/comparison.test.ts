@@ -26,6 +26,7 @@ const testConfig = {
   dataDir: ':memory:',
   dbPath: ':memory:',
   memory: {
+    encodingSampleRate: 0.3,
     importanceThreshold: 0.4,
     fadeThreshold: 0.3,
     maxRetrievalResults: 5,
