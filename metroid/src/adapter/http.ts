@@ -603,6 +603,8 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
       growthChanges: growthCount,
       timing: result.timing,
       tokenUsage: result.tokenUsage,
+      usage: result.usage || null,
+      voiceHint: result.voiceHint || null,
       fragmentSummary: result.fragmentSummary,
     });
   } catch (err: any) {
@@ -610,16 +612,22 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
   }
 });
 
-route('GET', '/agents/:id/emotion', (_req, res, { id }) => {
-  const emotion = metroid.getEmotionState(id);
+route('GET', '/agents/:id/emotion', (req, res, { id }) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const userId = url.searchParams.get('userId') || undefined;
+  const emotion = metroid.getEmotionState(id, userId);
   if (!emotion) return error(res, 'agent not found', 404);
-  json(res, { emotion });
+  json(res, { emotion, userId: userId || null });
 });
 
 route('GET', '/agents/:id/memories', (req, res, { id }) => {
   const url = new URL(req.url!, `http://localhost`);
   const limit = parseInt(url.searchParams.get('limit') || '10');
-  const memories = metroid.getRecentMemories(id, limit);
+  const type = url.searchParams.get('type') || undefined;
+  const search = url.searchParams.get('search') || undefined;
+  const memories = (type || search)
+    ? metroid.getRecentMemoriesFiltered(id, limit, type, search)
+    : metroid.getRecentMemories(id, limit);
   json(res, {
     memories: memories.map(m => ({
       id: m.id, type: m.type,
@@ -818,6 +826,47 @@ route('GET', '/agents/:id/growth/all', (req, res, { id }) => {
   });
 });
 
+// === Admin Panel API ===
+
+route('GET', '/agents/:id/memories/stats', (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const stats = metroid.getMemoryStats(id);
+  json(res, { stats });
+});
+
+route('GET', '/agents/:id/entity-relations', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '100');
+  const relations = metroid.getEntityRelations(id, limit);
+  json(res, { relations });
+});
+
+route('GET', '/agents/:id/emotion/history', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url!, `http://localhost`);
+  const hours = parseInt(url.searchParams.get('hours') || '24');
+  const history = metroid.getEmotionHistory(id, hours);
+  json(res, { history });
+});
+
+route('GET', '/agents/:id/emotion/users', (_req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const users = metroid.getEmotionUsers(id);
+  json(res, { users });
+});
+
+route('POST', '/agents/:id/growth/:changeId/revert', (_req, res, { id, changeId }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const ok = metroid.revertGrowthChange(id, changeId);
+  json(res, { ok });
+});
+
 route('GET', '/debug/config', (_req, res) => {
   const llm = metroid.getLLMConfig();
   json(res, { llm });
@@ -996,6 +1045,97 @@ route('POST', '/conversations/:id/message', async (req, res, { id }) => {
   }
 });
 
+// === Metadata endpoints (P1-B) ===
+
+route('PUT', '/agents/:id/metadata', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  const ok = metroid.updateAgentMetadata(id, body);
+  if (!ok) return error(res, 'no valid fields to update');
+  json(res, { ok: true });
+});
+
+route('GET', '/agents/:id/stats', (_req, res, { id }) => {
+  const stats = metroid.getAgentStats(id);
+  if (!stats) return error(res, 'agent not found', 404);
+  json(res, stats);
+});
+
+route('POST', '/agents/:id/rate', async (req, res, { id }) => {
+  const body = await readBody(req);
+  if (!body.userId || body.score === undefined) return error(res, 'userId and score required');
+  if (body.score < 1 || body.score > 5) return error(res, 'score must be 1-5');
+  const result = metroid.rateAgent(id, body.userId, body.score);
+  if (!result) return error(res, 'agent not found', 404);
+  json(res, result);
+});
+
+// === Friendship endpoints (P1-C) ===
+
+route('POST', '/friends', async (req, res) => {
+  const body = await readBody(req);
+  if (!body.userId || !body.agentId) return error(res, 'userId and agentId required');
+  const result = metroid.addFriend(body.userId, body.agentId);
+  if (!result) return error(res, 'agent not found or already friends', 400);
+  json(res, result, 201);
+});
+
+route('DELETE', '/friends/:id', async (req, res, { id }) => {
+  const body = await readBody(req);
+  if (!body.userId) return error(res, 'userId required');
+  const ok = metroid.removeFriend(body.userId, id);
+  if (!ok) return error(res, 'friendship not found', 404);
+  json(res, { ok: true });
+});
+
+route('GET', '/friends', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const userId = url.searchParams.get('userId');
+  if (!userId) return error(res, 'userId query param required');
+  const friends = metroid.getFriends(userId);
+  json(res, { friends });
+});
+
+// === Discovery endpoints (P2-A) ===
+
+route('GET', '/discover', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const tags = url.searchParams.get('tags')?.split(',').filter(Boolean);
+  const limit = parseInt(url.searchParams.get('limit') || '10');
+  const excludeIds = url.searchParams.get('excludeIds')?.split(',').filter(Boolean);
+  const results = metroid.discover({ tags, limit, excludeIds });
+  json(res, { results });
+});
+
+route('GET', '/discover/recommended', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const userId = url.searchParams.get('userId');
+  if (!userId) return error(res, 'userId query param required');
+  const limit = parseInt(url.searchParams.get('limit') || '10');
+  const results = metroid.discoverRecommended(userId, limit);
+  json(res, { results });
+});
+
+// === Feed Reaction endpoints (P2-B) ===
+
+route('POST', '/agents/:id/feed/:postId/react', async (req, res, { id, postId }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (!body.userId) return error(res, 'userId required');
+  const result = metroid.reactToFeed(postId, body.userId, body.type || 'like', body.content);
+  if (!result) return error(res, 'reaction failed', 500);
+  json(res, result, 201);
+});
+
+route('GET', '/agents/:id/feed/:postId/reactions', (_req, res, { id, postId }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const reactions = metroid.getFeedReactions(postId);
+  json(res, { reactions });
+});
+
 // === Server ===
 
 init();
@@ -1033,7 +1173,7 @@ const server = createServer(async (req, res) => {
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
@@ -1062,7 +1202,7 @@ const server = createServer(async (req, res) => {
 
   // Rate limiting
   const clientIp = (req.socket.remoteAddress || '127.0.0.1');
-  const limitType = method === 'POST' ? 'mutation' : 'read';
+  const limitType = (method === 'POST' || method === 'PUT' || method === 'DELETE') ? 'mutation' : 'read';
   if (!checkRateLimit(clientIp, limitType)) {
     res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
     res.end(JSON.stringify({ error: 'rate limit exceeded' }));
