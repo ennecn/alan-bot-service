@@ -118,6 +118,37 @@ export class IdentityEngine implements Engine {
     }];
   }
 
+  /** Update a mutable trait's intensity. Creates the trait if it doesn't exist. */
+  updateTrait(agentId: string, trait: string, delta: number): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+
+    if (!agent.card.soul) {
+      agent.card.soul = { immutableValues: [], mutableTraits: [] };
+    }
+    if (!agent.card.soul.mutableTraits) {
+      agent.card.soul.mutableTraits = [];
+    }
+
+    const existing = agent.card.soul.mutableTraits.find(t => t.trait === trait);
+    if (existing) {
+      existing.intensity = Math.max(0, Math.min(1, existing.intensity + delta));
+    } else {
+      agent.card.soul.mutableTraits.push({
+        trait,
+        intensity: Math.max(0, Math.min(1, 0.5 + delta)),
+      });
+    }
+
+    this.persistCard(agentId, agent);
+  }
+
+  /** Persist the card JSON to DB */
+  persistCard(agentId: string, agent: AgentIdentity): void {
+    this.db.prepare('UPDATE agents SET card_json = ?, updated_at = datetime(?) WHERE id = ?')
+      .run(JSON.stringify(agent.card), new Date().toISOString(), agentId);
+  }
+
   /** Update agent mode */
   setMode(agentId: string, mode: AgentMode): void {
     const agent = this.agents.get(agentId);
