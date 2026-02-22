@@ -100,6 +100,8 @@ export interface MetroidCard {
     resilience?: number;      // 0-1, how fast emotions recover (0=brooding, 1=bouncy)
     expressiveness?: number;  // 0-1, how easily impulse converts to action
     restraint?: number;       // 0-1, self-control (0=impulsive, 1=restrained)
+    moodInertia?: number;              // 0-1, long-term mood inertia (default 0.9)
+    longTermDimensions?: string[];     // tracked long-term dimensions (default ['attachment','trust'])
   };
   memoryStyle?: {
     encodingRate: number;
@@ -163,7 +165,7 @@ export interface ImpulseConfig {
 }
 
 export interface ImpulseSignal {
-  type: 'emotion_pattern' | 'idle' | 'time_of_day';
+  type: 'emotion_pattern' | 'idle' | 'time_of_day' | 'emotion_pressure';
   weight: number;              // 0-1, contribution weight
   emotionCondition?: EmotionPattern;
   idleMinutes?: number;
@@ -192,6 +194,7 @@ export interface ImpulseState {
 export interface ActiveEvent {
   name: string;
   intensity: number;           // 0-1
+  relevance: number;           // 0-1, event-character relevance (default 0.8)
   createdAt: number;           // timestamp
   decayRate: number;           // per-hour decay (default 0.5)
 }

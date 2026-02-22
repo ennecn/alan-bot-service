@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createTestDb } from './helpers.js';
 import { IdentityEngine } from '../src/engines/identity/index.js';
 import { EmotionEngine } from '../src/engines/emotion/index.js';
@@ -71,6 +71,75 @@ const impulseCard: MetroidCard = {
     },
   },
 };
+
+// === Helper functions for new test suites ===
+
+function setImpulseValue(engine: ProactiveEngine, agentId: string, value: number): void {
+  const state = engine.getImpulseState(agentId);
+  if (state) state.value = value;
+}
+
+function makeImpulseCard(overrides?: Partial<MetroidCard['proactive']>['impulse']): MetroidCard {
+  return {
+    ...proactiveCard,
+    name: 'ImpulseTestBot',
+    emotion: {
+      baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+      intensityDial: 0.8,
+      expressiveness: 0.8,
+      restraint: 0.2,
+    },
+    proactive: {
+      enabled: true,
+      triggers: [],
+      impulse: {
+        enabled: true,
+        signals: [
+          { type: 'idle', weight: 0.5, idleMinutes: 30 },
+        ],
+        decayRate: 0.1,
+        fireThreshold: 0.6,
+        cooldownMinutes: 10,
+        promptTemplate: '基于当前内心状态，自然地主动发一条消息。',
+        ...overrides,
+      },
+    },
+  };
+}
+
+function makeEmotionPatternCard(
+  conditions: Array<{ axis: 'pleasure' | 'arousal' | 'dominance'; op: '<' | '>'; value: number }>,
+  sustainedMinutes?: number,
+): MetroidCard {
+  return {
+    ...proactiveCard,
+    name: 'EmotionPatternBot',
+    emotion: {
+      baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+      intensityDial: 0.8,
+      expressiveness: 0.8,
+      restraint: 0.2,
+    },
+    proactive: {
+      enabled: true,
+      triggers: [],
+      impulse: {
+        enabled: true,
+        signals: [
+          {
+            type: 'emotion_pattern',
+            weight: 1.0,
+            emotionCondition: { conditions, sustainedMinutes },
+          },
+        ],
+        decayRate: 0.01,
+        fireThreshold: 0.3,
+        cooldownMinutes: 1,
+        promptTemplate: 'emotion pattern test',
+      },
+    },
+  };
+}
 
 describe('ProactiveEngine', () => {
   let db: Database.Database;
@@ -340,13 +409,14 @@ describe('ProactiveEngine', () => {
       }
     });
 
-    it('should deduplicate events by name', () => {
+    it('should deduplicate events by name (with cooldown penalty)', () => {
       engine.start(agentId);
       engine.addActiveEvent(agentId, 'loneliness', 0.5);
       engine.addActiveEvent(agentId, 'loneliness', 0.8);
       const state = engine.getImpulseState(agentId);
       expect(state!.activeEvents).toHaveLength(1);
-      expect(state!.activeEvents[0].intensity).toBe(0.8); // takes max
+      // Within 10 min cooldown: new intensity = 0.8 * 0.5 = 0.4, max(0.5, 0.4) = 0.5
+      expect(state!.activeEvents[0].intensity).toBe(0.5);
     });
 
     it('should not start for classic mode agents', () => {
@@ -479,6 +549,1495 @@ describe('ProactiveEngine', () => {
       await engine.evaluateAll(agent.id);
       expect(received).toHaveLength(1);
       expect(received[0].content).toBe('callback test');
+    });
+  });
+
+  // === Suite 1: Impulse Firing Decision ===
+
+  describe('impulse firing decision', () => {
+    beforeEach(() => {
+      const agent = identity.createAgent('ImpulseBot', impulseCard, 'enhanced');
+      agentId = agent.id;
+      engine.setGenerateFn(async () => 'impulse message');
+    });
+
+    it('should accumulate idle signal over time', async () => {
+      engine.start(agentId);
+      engine.advanceTime(15); // half of 30 min idle target
+      await engine.evaluateAll(agentId);
+      const state = engine.getImpulseState(agentId)!;
+      expect(state.value).toBeGreaterThan(0);
+    });
+
+    it('should fire when impulse exceeds threshold and random passes', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0); // always pass
+      engine.start(agentId);
+      setImpulseValue(engine, agentId, 0.8); // above 0.6 threshold
+      await engine.evaluateAll(agentId);
+      const msgs = engine.getPendingMessages(agentId);
+      expect(msgs.length).toBeGreaterThanOrEqual(1);
+      const impulseMsg = msgs.find(m => m.triggerId === 'impulse');
+      expect(impulseMsg).toBeDefined();
+      vi.restoreAllMocks();
+    });
+
+    it('should suppress when random does not pass', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.999); // never pass
+      engine.start(agentId);
+      setImpulseValue(engine, agentId, 0.8);
+      await engine.evaluateAll(agentId);
+      const state = engine.getImpulseState(agentId)!;
+      expect(state.suppressionCount).toBeGreaterThanOrEqual(1);
+      vi.restoreAllMocks();
+    });
+
+    it('should apply suppression bonus to lower dynamic threshold', async () => {
+      engine.start(agentId);
+      const state = engine.getImpulseState(agentId)!;
+      // Simulate 4 suppressions → bonus = 0.2
+      state.suppressionCount = 4;
+      state.value = 0.65; // just above base threshold
+      vi.spyOn(Math, 'random').mockReturnValue(0); // always pass
+      await engine.evaluateAll(agentId);
+      // With suppression bonus, dynamic threshold is lower → should fire
+      const msgs = engine.getPendingMessages(agentId);
+      expect(msgs.find(m => m.triggerId === 'impulse')).toBeDefined();
+      vi.restoreAllMocks();
+    });
+
+    it('should not fire during cooldown period', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      engine.start(agentId);
+      setImpulseValue(engine, agentId, 0.8);
+      await engine.evaluateAll(agentId);
+      expect(engine.getPendingMessages(agentId).find(m => m.triggerId === 'impulse')).toBeDefined();
+
+      // Fire again within cooldown (10 min)
+      setImpulseValue(engine, agentId, 0.9);
+      engine.advanceTime(5); // only 5 min
+      await engine.evaluateAll(agentId);
+      // Should still only have 1 impulse message
+      const impulseMessages = engine.getPendingMessages(agentId).filter(m => m.triggerId === 'impulse');
+      expect(impulseMessages).toHaveLength(1);
+      vi.restoreAllMocks();
+    });
+
+    it('should not fire when pending messages at max', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      engine.start(agentId);
+      // Fill up pending messages
+      for (let i = 0; i < 5; i++) {
+        db.prepare('INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content) VALUES (?, ?, ?, ?, ?)')
+          .run(`fill-${i}`, agentId, 'test', 'idle', `msg ${i}`);
+      }
+      setImpulseValue(engine, agentId, 0.9);
+      await engine.evaluateAll(agentId);
+      expect(engine.getPendingMessages(agentId)).toHaveLength(5); // no new ones
+      vi.restoreAllMocks();
+    });
+
+    it('should set residual impulse to 0.2 after firing', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      engine.start(agentId);
+      setImpulseValue(engine, agentId, 0.9);
+      await engine.evaluateAll(agentId);
+      const state = engine.getImpulseState(agentId)!;
+      expect(state.value).toBeCloseTo(0.2, 1);
+      vi.restoreAllMocks();
+    });
+
+    it('should clamp impulse value to [0, 1]', async () => {
+      engine.start(agentId);
+      const state = engine.getImpulseState(agentId)!;
+      state.value = 1.5;
+      await engine.evaluateAll(agentId);
+      expect(engine.getImpulseState(agentId)!.value).toBeLessThanOrEqual(1);
+
+      state.value = -0.5;
+      await engine.evaluateAll(agentId);
+      expect(engine.getImpulseState(agentId)!.value).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // === Suite 2: Signal Activation — emotion_pattern ===
+
+  describe('signal activation — emotion_pattern', () => {
+    it('should return activation=1 when all conditions met', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: -0.2 },
+        { axis: 'arousal', op: '>', value: 0.3 },
+      ]);
+      const agent = identity.createAgent('EP1', card, 'enhanced');
+      engine.start(agent.id);
+      // Set emotion state to satisfy conditions
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0.5, dominance: 0 };
+      engine.setGenerateFn(async () => 'emotion pattern fired');
+      // Add an active event so eventGate > 0
+      engine.addActiveEvent(agent.id, 'test-event', 0.8);
+      setImpulseValue(engine, agent.id, 0.1);
+      engine.advanceTime(60); // give time for gain accumulation
+      await engine.evaluateAll(agent.id);
+      const state = engine.getImpulseState(agent.id)!;
+      // With activation=1, weight=1.0, eventGate=0.8, impulse should increase
+      expect(state.value).toBeGreaterThan(0.1);
+    });
+
+    it('should return activation=0 when any condition not met', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: -0.2 },
+        { axis: 'arousal', op: '>', value: 0.3 },
+      ]);
+      const agent = identity.createAgent('EP2', card, 'enhanced');
+      engine.start(agent.id);
+      // pleasure satisfied, arousal NOT satisfied
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0.1, dominance: 0 };
+      engine.addActiveEvent(agent.id, 'test-event', 0.8);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      const state = engine.getImpulseState(agent.id)!;
+      // activation=0 → no gain from emotion_pattern signal
+      expect(state.value).toBe(0);
+    });
+
+    it('should return activation=0 when emotion state undefined', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: -0.2 },
+      ]);
+      const agent = identity.createAgent('EP3', card, 'enhanced');
+      engine.start(agent.id);
+      // Don't set emotion state — emotion.getState() returns undefined
+      engine.addActiveEvent(agent.id, 'test-event', 0.8);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+
+    it('should be gated by active events (eventGate=0 → no effect)', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: -0.2 },
+      ]);
+      const agent = identity.createAgent('EP4', card, 'enhanced');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      // NO active events → eventGate=0
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+
+    it('should work when active events present (eventGate>0)', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: -0.2 },
+      ]);
+      const agent = identity.createAgent('EP5', card, 'enhanced');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      engine.addActiveEvent(agent.id, 'loneliness', 0.6);
+      setImpulseValue(engine, agent.id, 0.1);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBeGreaterThan(0.1);
+    });
+
+    it('should require sustained snapshots when sustainedMinutes set', async () => {
+      const card = makeEmotionPatternCard(
+        [{ axis: 'pleasure', op: '<', value: -0.2 }],
+        10, // sustained for 10 minutes
+      );
+      const agent = identity.createAgent('EP6', card, 'enhanced');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      engine.addActiveEvent(agent.id, 'test', 0.8);
+      // Only 1 snapshot (from start) — need ≥2 in window
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      // With only initial snapshot, sustained check should fail (need ≥2)
+      // The value may still be 0 since sustained requires 2+ snapshots
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+  });
+
+  // === Suite 3: Signal Activation — idle smoothstep ===
+
+  describe('signal activation — idle smoothstep', () => {
+    it('should have activation≈0 at 0 minutes idle', async () => {
+      const card = makeImpulseCard({
+        signals: [{ type: 'idle', weight: 1.0, idleMinutes: 60 }],
+      });
+      const agent = identity.createAgent('Idle1', card, 'enhanced');
+      engine.start(agent.id);
+      engine.recordActivity(agent.id); // just active
+      setImpulseValue(engine, agent.id, 0);
+      // Don't advance time — idle = 0
+      await engine.evaluateAll(agent.id);
+      // smoothstep(0) = 0, so no gain
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+
+    it('should have activation≈smoothstep(0.5) at half idle time', async () => {
+      const card = makeImpulseCard({
+        signals: [{ type: 'idle', weight: 1.0, idleMinutes: 60 }],
+      });
+      const agent = identity.createAgent('Idle2', card, 'enhanced');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(30); // half of 60 min
+      await engine.evaluateAll(agent.id);
+      // smoothstep(0.5) = 0.5, gain = 1.0 * 0.5 * dtHours
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.value).toBeGreaterThan(0);
+    });
+
+    it('should have activation=1 at or beyond target idle time', async () => {
+      const card = makeImpulseCard({
+        signals: [{ type: 'idle', weight: 1.0, idleMinutes: 60 }],
+      });
+      const agent = identity.createAgent('Idle3', card, 'enhanced');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(120); // 2x target
+      await engine.evaluateAll(agent.id);
+      // smoothstep(1) = 1, max gain
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.value).toBeGreaterThan(0);
+    });
+
+    it('should reset to 0 after recordActivity', async () => {
+      const card = makeImpulseCard({
+        signals: [{ type: 'idle', weight: 1.0, idleMinutes: 60 }],
+      });
+      const agent = identity.createAgent('Idle4', card, 'enhanced');
+      engine.start(agent.id);
+      engine.advanceTime(30);
+      engine.recordActivity(agent.id); // reset idle
+      setImpulseValue(engine, agent.id, 0);
+      // Don't advance further — idle is now 0
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+  });
+
+  // === Suite 4: Signal Activation — time_of_day ===
+
+  describe('signal activation — time_of_day', () => {
+    it('should return 1 when current time is within range', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T10:00:00') });
+      const card = makeImpulseCard({
+        signals: [{ type: 'time_of_day', weight: 1.0, timeRange: { start: '08:00', end: '22:00' } }],
+      });
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      const agent = identity.createAgent('TOD1', card, 'enhanced');
+      localEngine.start(agent.id);
+      setImpulseValue(localEngine, agent.id, 0);
+      localEngine.advanceTime(60);
+      await localEngine.evaluateAll(agent.id);
+      expect(localEngine.getImpulseState(agent.id)!.value).toBeGreaterThan(0);
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should return 0 when current time is outside range', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T03:00:00') });
+      const card = makeImpulseCard({
+        signals: [{ type: 'time_of_day', weight: 1.0, timeRange: { start: '08:00', end: '22:00' } }],
+      });
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      const agent = identity.createAgent('TOD2', card, 'enhanced');
+      localEngine.start(agent.id);
+      setImpulseValue(localEngine, agent.id, 0);
+      localEngine.advanceTime(60);
+      await localEngine.evaluateAll(agent.id);
+      expect(localEngine.getImpulseState(agent.id)!.value).toBe(0);
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should handle midnight-crossing range (start > end)', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T23:30:00') });
+      const card = makeImpulseCard({
+        signals: [{ type: 'time_of_day', weight: 1.0, timeRange: { start: '22:00', end: '06:00' } }],
+      });
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      const agent = identity.createAgent('TOD3', card, 'enhanced');
+      localEngine.start(agent.id);
+      setImpulseValue(localEngine, agent.id, 0);
+      localEngine.advanceTime(60);
+      await localEngine.evaluateAll(agent.id);
+      expect(localEngine.getImpulseState(agent.id)!.value).toBeGreaterThan(0);
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should return 0 when no timeRange provided', async () => {
+      const card = makeImpulseCard({
+        signals: [{ type: 'time_of_day', weight: 1.0 }], // no timeRange
+      });
+      const agent = identity.createAgent('TOD4', card, 'enhanced');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+  });
+
+  // === Suite 5: Emotion Delta Trigger ===
+
+  describe('emotion delta trigger', () => {
+    it('should fire when pleasure drops beyond threshold in window', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const deltaCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'delta:pleasure<-0.3/30m', prompt: 'comfort', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      localEngine.setGenerateFn(async () => 'delta fired');
+      const agent = identity.createAgent('Delta1', deltaCard, 'enhanced');
+      // Set initial high pleasure
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id); // records snapshot #1 with pleasure=0.5
+      // Trigger interval to record snapshot #2
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      // Now drop pleasure significantly
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.1, arousal: 0, dominance: 0 };
+      // Trigger interval to record snapshot #3 with low pleasure + evaluate
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      const msgs = localEngine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerType === 'emotion')).toBeDefined();
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should not fire when drop is below threshold', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const deltaCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'delta:pleasure<-0.3/30m', prompt: 'comfort', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      localEngine.setGenerateFn(async () => 'should not fire');
+      const agent = identity.createAgent('Delta2', deltaCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id);
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      // Small drop — only 0.1
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.4, arousal: 0, dominance: 0 };
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      expect(localEngine.getPendingMessages(agent.id)).toHaveLength(0);
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should not fire with fewer than 2 snapshots', async () => {
+      const deltaCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'delta:pleasure<-0.5/30m', prompt: 'comfort', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const agent = identity.createAgent('Delta3', deltaCard, 'enhanced');
+      engine.setGenerateFn(async () => 'should not fire');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0, dominance: 0 };
+      engine.start(agent.id);
+      // Only 1 snapshot from start — evaluateAll won't add another
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(0);
+    });
+
+    it('should handle > operator correctly', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const deltaCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'delta:arousal>0.4/30m', prompt: 'excited', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      localEngine.setGenerateFn(async () => 'arousal spike');
+      const agent = identity.createAgent('Delta4', deltaCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: -0.2, dominance: 0 };
+      localEngine.start(agent.id);
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: 0.5, dominance: 0 };
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs);
+      await new Promise(r => process.nextTick(r));
+      expect(localEngine.getPendingMessages(agent.id).find(m => m.triggerType === 'emotion')).toBeDefined();
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should not crash on unparseable expression', async () => {
+      const deltaCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'delta:garbage!!!', prompt: 'nope', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const agent = identity.createAgent('Delta5', deltaCard, 'enhanced');
+      engine.setGenerateFn(async () => 'should not fire');
+      engine.start(agent.id);
+      engine.advanceTime(10);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(0);
+    });
+  });
+
+  // === Suite 6: Emotion Sustained Trigger ===
+
+  describe('emotion sustained trigger', () => {
+    it('should fire when all snapshots in window satisfy condition', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const sustainedCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/5m', prompt: 'sustained low', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      localEngine.setGenerateFn(async () => 'sustained fired');
+      const agent = identity.createAgent('Sust1', sustainedCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id); // snapshot #1
+      // Trigger intervals to record more snapshots
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs); // snapshot #2
+      await new Promise(r => process.nextTick(r));
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs); // snapshot #3 + evaluate
+      await new Promise(r => process.nextTick(r));
+      const msgs = localEngine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerType === 'emotion')).toBeDefined();
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should not fire when any snapshot violates condition', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const sustainedCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/5m', prompt: 'sustained low', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, testConfig);
+      localEngine.setGenerateFn(async () => 'should not fire');
+      const agent = identity.createAgent('Sust2', sustainedCard, 'enhanced');
+      // Start with low pleasure
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id); // snapshot #1 (low)
+      // Briefly recover BEFORE next interval
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.1, arousal: 0, dominance: 0 };
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs); // snapshot #2 (high — violates)
+      await new Promise(r => process.nextTick(r));
+      // Drop again
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      vi.advanceTimersByTime(testConfig.proactive.checkIntervalMs); // snapshot #3 (low)
+      await new Promise(r => process.nextTick(r));
+      // Snapshot #2 violates the condition → should not fire
+      expect(localEngine.getPendingMessages(agent.id)).toHaveLength(0);
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should not fire with fewer than 2 snapshots in window', async () => {
+      const sustainedCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/1m', prompt: 'too short', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const agent = identity.createAgent('Sust3', sustainedCard, 'enhanced');
+      engine.setGenerateFn(async () => 'should not fire');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      // Only initial snapshot, no interval triggered
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(0);
+    });
+
+    it('should only consider snapshots within the time window', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      // Use short check interval (10s) so we can accumulate snapshots quickly
+      const cfg = { ...testConfig, proactive: { ...testConfig.proactive, checkIntervalMs: 10_000 } };
+      const sustainedCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/1m', prompt: 'windowed', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, cfg);
+      localEngine.setGenerateFn(async () => 'windowed fired');
+      const agent = identity.createAgent('Sust4', sustainedCard, 'enhanced');
+      // Old snapshot with high pleasure
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id); // snapshot at t=0 (high)
+      // Now set low pleasure
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      // Advance enough intervals so old snapshot falls outside 1m window
+      for (let i = 0; i < 12; i++) { // 12 × 10s = 120s > 60s window
+        vi.advanceTimersByTime(10_000);
+      }
+      await new Promise(r => process.nextTick(r));
+      // Recent snapshots all satisfy, old one is outside 1m window
+      const msgs = localEngine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerType === 'emotion')).toBeDefined();
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+  });
+
+  // === Suite 7: Emotion History Ring Buffer ===
+
+  describe('emotion history ring buffer', () => {
+    it('should not crash after many interval ticks (ring buffer eviction)', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const cfg = { ...testConfig, proactive: { ...testConfig.proactive, checkIntervalMs: 100 } };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, cfg);
+      const agent = identity.createAgent('Ring1', proactiveCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id);
+
+      // Trigger 70 intervals (exceeds EMOTION_HISTORY_MAX=60)
+      for (let i = 0; i < 70; i++) {
+        vi.advanceTimersByTime(100);
+      }
+      // Flush any pending microtasks
+      await new Promise(r => process.nextTick(r));
+
+      // Engine should still function correctly after ring buffer eviction
+      await localEngine.evaluateAll(agent.id);
+      expect(true).toBe(true); // no crash = pass
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+
+    it('should maintain time ordering in ring buffer', async () => {
+      vi.useFakeTimers({ now: new Date('2026-01-01T12:00:00') });
+      const cfg = { ...testConfig, proactive: { ...testConfig.proactive, checkIntervalMs: 1000 } };
+      // Use sustained trigger to verify snapshots are in order
+      const sustainedCard: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.1/5m', prompt: 'ordered', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const localEngine = new ProactiveEngine(db, identity, emotion, audit, cfg);
+      localEngine.setGenerateFn(async () => 'ordered test');
+      const agent = identity.createAgent('Ring2', sustainedCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      localEngine.start(agent.id);
+      // Record several snapshots
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(1000);
+      }
+      await new Promise(r => process.nextTick(r));
+      // Sustained trigger should work (all snapshots satisfy, in order)
+      const msgs = localEngine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerType === 'emotion')).toBeDefined();
+      localEngine.stop();
+      vi.useRealTimers();
+    });
+  });
+
+  // === Suite 8: Impulse Message Generation (fireImpulse) ===
+
+  describe('impulse message generation', () => {
+    it('should include structured internal state and events in prompt', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire1', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.3, arousal: 0.5, dominance: 0.1 };
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test msg'; });
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'loneliness', 0.6);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('<internal_state>');
+      expect(capturedPrompt).toContain('<emotion_trajectory>');
+      expect(capturedPrompt).toContain('<trigger_context>');
+      expect(capturedPrompt).toContain('loneliness');
+      expect(capturedPrompt).toContain('冲动强度');
+      vi.restoreAllMocks();
+    });
+
+    it('should record triggerType based on dominant signal in DB', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire2', card, 'enhanced');
+      engine.setGenerateFn(async () => 'db test');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msgs = engine.getPendingMessages(agent.id);
+      const impulseMsg = msgs.find(m => m.triggerId === 'impulse');
+      expect(impulseMsg).toBeDefined();
+      // idle-only card → impulse:idle
+      expect(impulseMsg!.triggerType).toBe('impulse:idle');
+      vi.restoreAllMocks();
+    });
+
+    it('should write audit log on fire', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire3', card, 'enhanced');
+      engine.setGenerateFn(async () => 'audit test');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      // Check audit log in DB
+      const logs = db.prepare('SELECT * FROM audit_log WHERE action = ?').all('proactive.impulse_fire');
+      expect(logs.length).toBeGreaterThanOrEqual(1);
+      vi.restoreAllMocks();
+    });
+
+    it('should not insert message when generateFn returns empty string', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire4', card, 'enhanced');
+      engine.setGenerateFn(async () => '');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id).filter(m => m.triggerId === 'impulse')).toHaveLength(0);
+      vi.restoreAllMocks();
+    });
+
+    it('should not insert message when generateFn returns single char', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire5', card, 'enhanced');
+      engine.setGenerateFn(async () => 'x');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id).filter(m => m.triggerId === 'impulse')).toHaveLength(0);
+      vi.restoreAllMocks();
+    });
+
+    it('should call onMessageFn callback on successful fire', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire6', card, 'enhanced');
+      engine.setGenerateFn(async () => 'callback impulse');
+      const received: any[] = [];
+      engine.setOnMessageFn((_id, msg) => received.push(msg));
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(received.find(m => m.triggerId === 'impulse')).toBeDefined();
+      vi.restoreAllMocks();
+    });
+
+    it('should use default template when no promptTemplate provided', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard({ promptTemplate: undefined as any });
+      const agent = identity.createAgent('Fire7', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'default template'; });
+      engine.start(agent.id);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('基于当前内心状态');
+      vi.restoreAllMocks();
+    });
+
+    it('should omit active_events section when no active events', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Fire8', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'no events'; });
+      engine.start(agent.id);
+      // No active events added
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).not.toContain('<active_events>');
+      expect(capturedPrompt).toContain('<trigger_context>');
+      vi.restoreAllMocks();
+    });
+  });
+
+  // === Suite 9: Multi-Agent Isolation ===
+
+  describe('multi-agent isolation', () => {
+    let agentA: string;
+    let agentB: string;
+
+    beforeEach(() => {
+      const a = identity.createAgent('AgentA', impulseCard, 'enhanced');
+      const b = identity.createAgent('AgentB', impulseCard, 'enhanced');
+      agentA = a.id;
+      agentB = b.id;
+      engine.setGenerateFn(async () => 'isolated msg');
+      engine.start(agentA);
+      engine.start(agentB);
+    });
+
+    it('should have independent impulse values', () => {
+      setImpulseValue(engine, agentA, 0.8);
+      expect(engine.getImpulseState(agentA)!.value).toBe(0.8);
+      expect(engine.getImpulseState(agentB)!.value).toBe(0);
+    });
+
+    it('should have independent active events', () => {
+      engine.addActiveEvent(agentA, 'loneliness', 0.5);
+      expect(engine.getImpulseState(agentA)!.activeEvents).toHaveLength(1);
+      expect(engine.getImpulseState(agentB)!.activeEvents).toHaveLength(0);
+    });
+
+    it('should have independent cooldowns', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agentA, 0.9);
+      await engine.evaluateAll(agentA);
+      // Agent A fired, now in cooldown
+      expect(engine.getImpulseState(agentA)!.lastFireTime).toBeGreaterThan(0);
+      // Agent B should not be affected
+      expect(engine.getImpulseState(agentB)!.lastFireTime).toBe(0);
+      vi.restoreAllMocks();
+    });
+
+    it('should have independent suppression counts', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0.999);
+      setImpulseValue(engine, agentA, 0.9);
+      await engine.evaluateAll(agentA);
+      expect(engine.getImpulseState(agentA)!.suppressionCount).toBeGreaterThanOrEqual(1);
+      expect(engine.getImpulseState(agentB)!.suppressionCount).toBe(0);
+      vi.restoreAllMocks();
+    });
+
+    it('should not let agent A firing affect agent B', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agentA, 0.9);
+      await engine.evaluateAll(agentA);
+      const msgsA = engine.getPendingMessages(agentA);
+      const msgsB = engine.getPendingMessages(agentB);
+      expect(msgsA.find(m => m.triggerId === 'impulse')).toBeDefined();
+      expect(msgsB).toHaveLength(0);
+      vi.restoreAllMocks();
+    });
+  });
+
+  // === Suite 10: Integration — Full Lifecycle ===
+
+  describe('integration — full lifecycle', () => {
+    it('should complete: start → chat → event → impulse → fire → deliver', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard({
+        signals: [
+          { type: 'idle', weight: 0.8, idleMinutes: 10 },
+        ],
+        fireThreshold: 0.3,
+        cooldownMinutes: 1,
+      });
+      const agent = identity.createAgent('Lifecycle', card, 'enhanced');
+      engine.setGenerateFn(async () => 'lifecycle message');
+      engine.start(agent.id);
+
+      // Simulate chat activity
+      await engine.onResponse('ok', ctx(agent.id, '你好'));
+      expect(engine.getImpulseState(agent.id)!.activeEvents).toHaveLength(0);
+
+      // Simulate emotional event
+      await engine.onResponse('ok', ctx(agent.id, '好孤独啊'));
+      expect(engine.getImpulseState(agent.id)!.activeEvents.find(e => e.name === 'loneliness')).toBeDefined();
+
+      // Advance time for idle accumulation
+      engine.advanceTime(30);
+      setImpulseValue(engine, agent.id, 0.5);
+      await engine.evaluateAll(agent.id);
+
+      // Check message was generated and can be delivered
+      const msgs = engine.getPendingMessages(agent.id);
+      expect(msgs.length).toBeGreaterThanOrEqual(1);
+      engine.markDelivered(msgs[0].id);
+      expect(engine.getPendingMessages(agent.id).length).toBeLessThan(msgs.length);
+      vi.restoreAllMocks();
+    });
+
+    it('should preserve pending messages across stop/start (DB-backed)', async () => {
+      const agent = identity.createAgent('Persist', proactiveCard, 'enhanced');
+      engine.setGenerateFn(async () => 'persistent msg');
+      engine.start(agent.id);
+      engine.advanceTime(6);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(1);
+
+      // Stop and restart
+      engine.stop(agent.id);
+      engine.start(agent.id);
+      // Messages are in DB, should still be retrievable
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(1);
+    });
+  });
+
+  // === Suite 11: Event Decay ===
+
+  describe('event decay', () => {
+    it('should decay event intensity exponentially', async () => {
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Decay1', card, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'test-decay', 0.8, 1.0); // decayRate=1.0/hour
+      const initial = engine.getImpulseState(agent.id)!.activeEvents[0].intensity;
+      expect(initial).toBe(0.8);
+
+      // Advance 1 hour
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      const after1h = engine.getImpulseState(agent.id)!.activeEvents;
+      if (after1h.length > 0) {
+        // intensity × exp(-1.0 × 1) ≈ 0.8 × 0.368 ≈ 0.294
+        expect(after1h[0].intensity).toBeLessThan(0.5);
+        expect(after1h[0].intensity).toBeGreaterThan(0.1);
+      }
+    });
+
+    it('should remove events when intensity drops below 0.05', async () => {
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Decay2', card, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'weak-event', 0.1, 2.0); // fast decay
+      engine.advanceTime(120); // 2 hours with decayRate=2.0
+      await engine.evaluateAll(agent.id);
+      // 0.1 × exp(-2.0 × 2) ≈ 0.1 × 0.018 ≈ 0.002 < 0.05 → removed
+      expect(engine.getImpulseState(agent.id)!.activeEvents).toHaveLength(0);
+    });
+
+    it('should compute eventGate as max of remaining event intensities', async () => {
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: 0 },
+      ]);
+      const agent = identity.createAgent('Decay3', card, 'enhanced');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      // Add two events with different intensities
+      engine.addActiveEvent(agent.id, 'event-strong', 0.9, 0.1);
+      engine.addActiveEvent(agent.id, 'event-weak', 0.3, 0.1);
+      // eventGate should be max(0.9, 0.3) = 0.9
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      // With eventGate=0.9 and emotion_pattern activation=1, impulse should increase
+      expect(engine.getImpulseState(agent.id)!.value).toBeGreaterThan(0);
+    });
+  });
+
+  // ============================================================
+  // V2 Tests — Proactive Engine V2 Enhancements
+  // ============================================================
+
+  // === Suite 12: evaluateAll snapshot consistency ===
+
+  describe('V2: evaluateAll snapshot consistency', () => {
+    it('should record snapshot on manual evaluateAll call', async () => {
+      const card: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/1m', prompt: 'snapshot test', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const agent = identity.createAgent('Snap1', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      engine.setGenerateFn(async () => 'snapshot fired');
+      engine.start(agent.id); // snapshot #1
+      // Manual evaluateAll should record snapshot #2
+      await engine.evaluateAll(agent.id);
+      // Another manual call records snapshot #3
+      await engine.evaluateAll(agent.id);
+      // Now we have 3 snapshots — sustained trigger should work
+      // (all snapshots satisfy pleasure < -0.2)
+      const msgs = engine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerType === 'emotion')).toBeDefined();
+    });
+
+    it('should not fire sustained trigger with only start snapshot (no evaluateAll)', async () => {
+      const card: MetroidCard = {
+        ...proactiveCard,
+        proactive: {
+          enabled: true,
+          triggers: [
+            { type: 'emotion', condition: 'sustained:pleasure<-0.2/1m', prompt: 'no snap', cooldownMinutes: 60 },
+          ],
+        },
+      };
+      const agent = identity.createAgent('Snap2', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      engine.setGenerateFn(async () => 'should not fire');
+      engine.start(agent.id); // only 1 snapshot
+      // Don't call evaluateAll — only 1 snapshot, sustained needs ≥2
+      expect(engine.getPendingMessages(agent.id)).toHaveLength(0);
+    });
+  });
+
+  // === Suite 13: computeTrajectory ===
+
+  describe('V2: computeTrajectory', () => {
+    it('should detect rising trajectory', () => {
+      const agent = identity.createAgent('Traj1', proactiveCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.3, arousal: 0, dominance: 0 };
+      engine.start(agent.id); // snapshot at pleasure=-0.3
+      engine.advanceTime(30);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.3, arousal: 0, dominance: 0 };
+      // Record another snapshot via evaluateAll
+      engine.evaluateAll(agent.id);
+      const traj = engine.computeTrajectory(agent.id);
+      expect(traj.pleasure.direction).toBe('rising');
+      expect(traj.pleasure.delta).toBeGreaterThan(0.05);
+    });
+
+    it('should detect falling trajectory', () => {
+      const agent = identity.createAgent('Traj2', proactiveCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0, dominance: 0 };
+      engine.start(agent.id);
+      engine.advanceTime(30);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.2, arousal: 0, dominance: 0 };
+      engine.evaluateAll(agent.id);
+      const traj = engine.computeTrajectory(agent.id);
+      expect(traj.pleasure.direction).toBe('falling');
+      expect(traj.pleasure.delta).toBeLessThan(-0.05);
+    });
+
+    it('should detect stable trajectory', () => {
+      const agent = identity.createAgent('Traj3', proactiveCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.1, arousal: 0, dominance: 0 };
+      engine.start(agent.id);
+      engine.advanceTime(30);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.12, arousal: 0, dominance: 0 };
+      engine.evaluateAll(agent.id);
+      const traj = engine.computeTrajectory(agent.id);
+      expect(traj.pleasure.direction).toBe('stable');
+    });
+  });
+
+  // === Suite 14: event relevance ===
+
+  describe('V2: event relevance', () => {
+    it('should store relevance on active events', () => {
+      const agent = identity.createAgent('Rel1', impulseCard, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'test', 0.8, 0.5, 0.9);
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.activeEvents[0].relevance).toBe(0.9);
+    });
+
+    it('should default relevance to 0.8', () => {
+      const agent = identity.createAgent('Rel2', impulseCard, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'test', 0.8);
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.activeEvents[0].relevance).toBe(0.8);
+    });
+
+    it('should use intensity×relevance for eventGate', async () => {
+      // High intensity but low relevance → lower eventGate
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: 0 },
+      ]);
+      const agent = identity.createAgent('Rel3', card, 'enhanced');
+      engine.start(agent.id);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      // intensity=0.8, relevance=0.1 → eventGate = 0.08
+      engine.addActiveEvent(agent.id, 'low-rel', 0.8, 0.5, 0.1);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      const val = engine.getImpulseState(agent.id)!.value;
+      // eventGate = 0.08, so gain is very small
+      expect(val).toBeLessThan(0.1);
+    });
+  });
+
+  // === Suite 15: emotion_pressure signal ===
+
+  describe('V2: emotion_pressure signal', () => {
+    function makePressureCard(): MetroidCard {
+      return {
+        ...proactiveCard,
+        name: 'PressureBot',
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+        },
+        proactive: {
+          enabled: true,
+          triggers: [],
+          impulse: {
+            enabled: true,
+            signals: [
+              { type: 'emotion_pressure', weight: 1.0 },
+            ],
+            decayRate: 0.01,
+            fireThreshold: 0.6,
+            cooldownMinutes: 10,
+            promptTemplate: 'pressure test',
+          },
+        },
+      };
+    }
+
+    it('should accumulate impulse from emotion pressure without events', async () => {
+      const card = makePressureCard();
+      const agent = identity.createAgent('Press1', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: 0 };
+      engine.start(agent.id);
+      // No active events — emotion_pressure bypasses eventGate
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBeGreaterThan(0);
+    });
+
+    it('should return 0 activation when emotion is at baseline', async () => {
+      const card = makePressureCard();
+      const agent = identity.createAgent('Press2', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: 0, dominance: 0 };
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+    });
+
+    it('should increase activation with distance from baseline', async () => {
+      const card = makePressureCard();
+      const agentNear = identity.createAgent('Press3a', card, 'enhanced');
+      const agentFar = identity.createAgent('Press3b', card, 'enhanced');
+      identity.getAgent(agentNear.id)!.emotionState = { pleasure: -0.2, arousal: 0, dominance: 0 };
+      identity.getAgent(agentFar.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: -0.3 };
+      engine.start(agentNear.id);
+      engine.start(agentFar.id);
+      setImpulseValue(engine, agentNear.id, 0);
+      setImpulseValue(engine, agentFar.id, 0);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agentNear.id);
+      await engine.evaluateAll(agentFar.id);
+      expect(engine.getImpulseState(agentFar.id)!.value).toBeGreaterThan(
+        engine.getImpulseState(agentNear.id)!.value
+      );
+    });
+
+    it('should fire impulse from pure emotion pressure', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makePressureCard();
+      const agent = identity.createAgent('Press4', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.9, arousal: 0.7, dominance: -0.5 };
+      engine.setGenerateFn(async () => 'pressure fired');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.7);
+      await engine.evaluateAll(agent.id);
+      const msgs = engine.getPendingMessages(agent.id);
+      expect(msgs.find(m => m.triggerId === 'impulse')).toBeDefined();
+      vi.restoreAllMocks();
+    });
+  });
+
+  // === Suite 16: long-term mood ===
+
+  describe('V2: long-term mood', () => {
+    it('should persist long-term mood on stop', () => {
+      const card: MetroidCard = {
+        ...impulseCard,
+        emotion: {
+          ...impulseCard.emotion!,
+          moodInertia: 0.5,
+          longTermDimensions: ['attachment', 'trust'],
+        },
+      };
+      const agent = identity.createAgent('LTM1', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.6, arousal: 0.4, dominance: 0.2 };
+      engine.start(agent.id);
+      // Record some snapshots
+      engine.advanceTime(10);
+      engine.evaluateAll(agent.id);
+      engine.advanceTime(10);
+      engine.evaluateAll(agent.id);
+      // Stop triggers updateLongTermMood
+      engine.stop(agent.id);
+      const mood = engine.getLongTermMood(agent.id);
+      expect(mood.attachment).toBeDefined();
+      expect(mood.trust).toBeDefined();
+      expect(typeof mood.attachment).toBe('number');
+    });
+
+    it('should apply EMA with moodInertia', () => {
+      const card: MetroidCard = {
+        ...impulseCard,
+        emotion: {
+          ...impulseCard.emotion!,
+          moodInertia: 0.5, // α = 0.5
+          longTermDimensions: ['attachment'],
+        },
+      };
+      const agent = identity.createAgent('LTM2', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.8, arousal: 0.8, dominance: 0 };
+      engine.start(agent.id);
+      engine.advanceTime(10);
+      engine.evaluateAll(agent.id);
+      engine.stop(agent.id);
+      const mood1 = engine.getLongTermMood(agent.id);
+      // First session: L = 0.5 * sessionAvg + 0.5 * 0 = 0.5 * sessionAvg
+      expect(mood1.attachment).toBeGreaterThan(0);
+
+      // Second session with different emotion
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: -0.5, dominance: 0 };
+      engine.start(agent.id);
+      engine.advanceTime(10);
+      engine.evaluateAll(agent.id);
+      engine.stop(agent.id);
+      const mood2 = engine.getLongTermMood(agent.id);
+      // Should have moved toward negative
+      expect(mood2.attachment).toBeLessThan(mood1.attachment);
+    });
+
+    it('should read empty mood for new agent', () => {
+      const agent = identity.createAgent('LTM3', impulseCard, 'enhanced');
+      const mood = engine.getLongTermMood(agent.id);
+      expect(Object.keys(mood)).toHaveLength(0);
+    });
+
+    it('should use default dimensions when not configured', () => {
+      const agent = identity.createAgent('LTM4', impulseCard, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+      engine.start(agent.id);
+      engine.advanceTime(10);
+      engine.evaluateAll(agent.id);
+      engine.stop(agent.id);
+      const mood = engine.getLongTermMood(agent.id);
+      // Default dimensions: attachment, trust
+      expect(mood.attachment).toBeDefined();
+      expect(mood.trust).toBeDefined();
+    });
+
+    it('should handle multiple stop/start cycles', () => {
+      const card: MetroidCard = {
+        ...impulseCard,
+        emotion: {
+          ...impulseCard.emotion!,
+          moodInertia: 0.8,
+          longTermDimensions: ['attachment'],
+        },
+      };
+      const agent = identity.createAgent('LTM5', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.5, dominance: 0 };
+      for (let i = 0; i < 3; i++) {
+        engine.start(agent.id);
+        engine.advanceTime(5);
+        engine.evaluateAll(agent.id);
+        engine.stop(agent.id);
+      }
+      const mood = engine.getLongTermMood(agent.id);
+      expect(mood.attachment).toBeGreaterThan(0);
+    });
+  });
+
+  // === Suite 17: event cooldown ===
+
+  describe('V2: event cooldown', () => {
+    it('should reduce intensity for duplicate event within 10 minutes', () => {
+      const agent = identity.createAgent('Cool1', impulseCard, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'loneliness', 0.5);
+      // Same event again immediately (within 10 min)
+      engine.addActiveEvent(agent.id, 'loneliness', 0.8);
+      const state = engine.getImpulseState(agent.id)!;
+      // New intensity = max(0.5, 0.8 * 0.5) = max(0.5, 0.4) = 0.5
+      expect(state.activeEvents[0].intensity).toBe(0.5);
+    });
+
+    it('should not reduce intensity for event after 10 minutes', () => {
+      const agent = identity.createAgent('Cool2', impulseCard, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'loneliness', 0.5);
+      engine.advanceTime(11); // past 10 min cooldown
+      engine.addActiveEvent(agent.id, 'loneliness', 0.8);
+      const state = engine.getImpulseState(agent.id)!;
+      // No cooldown penalty → max(0.5, 0.8) = 0.8
+      expect(state.activeEvents[0].intensity).toBe(0.8);
+    });
+
+    it('should not affect different event names', () => {
+      const agent = identity.createAgent('Cool3', impulseCard, 'enhanced');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'loneliness', 0.5);
+      engine.addActiveEvent(agent.id, 'farewell', 0.8);
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.activeEvents).toHaveLength(2);
+      expect(state.activeEvents.find(e => e.name === 'farewell')!.intensity).toBe(0.8);
+    });
+  });
+
+  // === Suite 18: fireImpulse prompt V2 ===
+
+  describe('V2: fireImpulse prompt structure', () => {
+    it('should include emotion_trajectory section', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Prompt1', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.3, arousal: 0.2, dominance: 0 };
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('<emotion_trajectory>');
+      expect(capturedPrompt).toContain('pleasure:');
+      expect(capturedPrompt).toContain('arousal:');
+      expect(capturedPrompt).toContain('dominance:');
+      expect(capturedPrompt).toContain('</emotion_trajectory>');
+      vi.restoreAllMocks();
+    });
+
+    it('should include active_events with relevance labels', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Prompt2', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'farewell', 0.8, 0.5, 0.9);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('<active_events>');
+      expect(capturedPrompt).toContain('farewell');
+      expect(capturedPrompt).toContain('高度相关');
+      vi.restoreAllMocks();
+    });
+
+    it('should include suppression count when suppressed', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Prompt3', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      const state = engine.getImpulseState(agent.id)!;
+      state.suppressionCount = 3;
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('已抑制: 3次');
+      vi.restoreAllMocks();
+    });
+
+    it('should include idle duration in trigger_context', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Prompt4', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      engine.advanceTime(45); // 45 min idle
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('沉默时长: 45分钟');
+      vi.restoreAllMocks();
+    });
+
+    it('should include long_term_mood when available', async () => {
+      let capturedPrompt = '';
+      const card: MetroidCard = {
+        ...makeImpulseCard(),
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+          moodInertia: 0.5,
+          longTermDimensions: ['attachment'],
+        },
+      };
+      const agent = identity.createAgent('Prompt5', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.5, dominance: 0 };
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      engine.advanceTime(5);
+      engine.evaluateAll(agent.id);
+      // Stop to persist mood, then restart
+      engine.stop(agent.id);
+      engine.start(agent.id);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).toContain('<long_term_mood>');
+      expect(capturedPrompt).toContain('attachment');
+      vi.restoreAllMocks();
+    });
+
+    it('should omit long_term_mood section when empty', async () => {
+      let capturedPrompt = '';
+      const card = makeImpulseCard();
+      const agent = identity.createAgent('Prompt6', card, 'enhanced');
+      engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test'; });
+      engine.start(agent.id);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      expect(capturedPrompt).not.toContain('<long_term_mood>');
+      vi.restoreAllMocks();
+    });
+  });
+
+  // === Suite 19: triggerType refinement ===
+
+  describe('V2: triggerType refinement', () => {
+    it('should return impulse:idle for idle-only signals', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeImpulseCard({
+        signals: [{ type: 'idle', weight: 1.0, idleMinutes: 30 }],
+      });
+      const agent = identity.createAgent('TT1', card, 'enhanced');
+      engine.setGenerateFn(async () => 'idle trigger');
+      engine.start(agent.id);
+      engine.advanceTime(60);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msg = engine.getPendingMessages(agent.id).find(m => m.triggerId === 'impulse');
+      expect(msg).toBeDefined();
+      expect(msg!.triggerType).toBe('impulse:idle');
+      vi.restoreAllMocks();
+    });
+
+    it('should return impulse:emotion for emotion_pressure-only signals', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card: MetroidCard = {
+        ...proactiveCard,
+        name: 'TT2Bot',
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+        },
+        proactive: {
+          enabled: true,
+          triggers: [],
+          impulse: {
+            enabled: true,
+            signals: [{ type: 'emotion_pressure', weight: 1.0 }],
+            decayRate: 0.01,
+            fireThreshold: 0.6,
+            cooldownMinutes: 10,
+            promptTemplate: 'emotion trigger type test',
+          },
+        },
+      };
+      const agent = identity.createAgent('TT2', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: 0 };
+      engine.setGenerateFn(async () => 'emotion trigger');
+      engine.start(agent.id);
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msg = engine.getPendingMessages(agent.id).find(m => m.triggerId === 'impulse');
+      expect(msg).toBeDefined();
+      expect(msg!.triggerType).toBe('impulse:emotion');
+      vi.restoreAllMocks();
+    });
+
+    it('should return impulse:mixed for balanced signals', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card: MetroidCard = {
+        ...proactiveCard,
+        name: 'TT3Bot',
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+        },
+        proactive: {
+          enabled: true,
+          triggers: [],
+          impulse: {
+            enabled: true,
+            signals: [
+              { type: 'idle', weight: 0.5, idleMinutes: 30 },
+              { type: 'emotion_pressure', weight: 0.5 },
+            ],
+            decayRate: 0.01,
+            fireThreshold: 0.6,
+            cooldownMinutes: 10,
+            promptTemplate: 'mixed trigger type test',
+          },
+        },
+      };
+      const agent = identity.createAgent('TT3', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: 0 };
+      engine.setGenerateFn(async () => 'mixed trigger');
+      engine.start(agent.id);
+      engine.advanceTime(60); // idle fully active
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msg = engine.getPendingMessages(agent.id).find(m => m.triggerId === 'impulse');
+      expect(msg).toBeDefined();
+      expect(msg!.triggerType).toBe('impulse:mixed');
+      vi.restoreAllMocks();
+    });
+
+    it('should return impulse:emotion for emotion_pattern with events', async () => {
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const card = makeEmotionPatternCard([
+        { axis: 'pleasure', op: '<', value: 0 },
+      ]);
+      // Override impulse config
+      card.proactive!.impulse!.cooldownMinutes = 1;
+      const agent = identity.createAgent('TT4', card, 'enhanced');
+      identity.getAgent(agent.id)!.emotionState = { pleasure: -0.5, arousal: 0, dominance: 0 };
+      engine.setGenerateFn(async () => 'emotion pattern trigger');
+      engine.start(agent.id);
+      engine.addActiveEvent(agent.id, 'test', 0.8);
+      setImpulseValue(engine, agent.id, 0.5);
+      engine.advanceTime(60);
+      await engine.evaluateAll(agent.id);
+      const msg = engine.getPendingMessages(agent.id).find(m => m.triggerId === 'impulse');
+      expect(msg).toBeDefined();
+      expect(msg!.triggerType).toBe('impulse:emotion');
+      vi.restoreAllMocks();
     });
   });
 });

@@ -1,6 +1,6 @@
-# Metroid 开发进度 (2026-02-21)
+# Metroid 开发进度 (2026-02-22)
 
-## 版本: v0.3.0
+## 版本: v0.3.1
 
 ## 代码同步记录
 
@@ -71,16 +71,32 @@
 - Web-IM adapter: 手写 WebSocket (零依赖)
 - ST vs Metroid 对比测试框架 (芙莉莲角色卡, 5 轮对话)
 
+### Proactive Engine V2 — 行为模型增强 (2026-02-22)
+- 设计文档: `metroid/docs/proactive-v2-design.md`
+- 核心目标: impulse 触发时的 LLM prompt 从薄弱的 "P=0.3 A=0.1" 变成富含上下文的结构化舞台指令
+- 类型扩展: ActiveEvent.relevance, ImpulseSignal.emotion_pressure, MetroidCard.emotion.moodInertia/longTermDimensions
+- DB: 新增 long_term_mood 表, 放宽 trigger_type CHECK (impulse:idle/emotion/mixed)
+- 引擎改动:
+  - evaluateAll 快照一致性修复 (手动 tick 也录入快照)
+  - computeTrajectory() — 情绪轨迹计算 (rising/falling/stable)
+  - 事件 relevance — eventGate 改为 max(intensity × relevance)
+  - emotion_pressure 信号 — 纯情绪偏离基线驱动, 不受 eventGate 门控
+  - 长期情绪 — EMA 更新 + DB 持久化 (会话结束时写入)
+  - 对话事件冷却 — 10 分钟内重复事件降低 50% intensity
+  - fireImpulse prompt V2 — 结构化 XML (轨迹/长期情绪/事件+relevance/抑制历史/沉默时长)
+  - triggerType 细化 — 基于 dominant signal 动态决定 (impulse:idle/emotion/mixed)
+- 测试: 84 → 114 (30 个新 V2 测试, 全部通过)
+
 ### 基础设施
 - 13 test files, Vitest 框架
 - SQLite (better-sqlite3) 存储
 - TypeScript 全量类型
 - 代码量: ~3785 行核心代码 (src/)
 
-### 测试现状 (2026-02-21)
+### 测试现状 (2026-02-22)
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| Passed | 83 | 核心引擎测试 |
+| Passed | 114 | 核心引擎测试 (含 30 个 Proactive V2 新测试) |
 | Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
 | Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
@@ -125,7 +141,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| Proactive Engine 测试 | 触发器 + impulse 零覆盖 (679 行代码无测试) |
+| Proactive Engine 测试 | ✅ 114 tests (V1 84 + V2 30), 全覆盖 |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
 | Social Engine 测试 | 关系更新无测试 |

@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS proactive_messages (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
   trigger_id TEXT NOT NULL,
-  trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event')),
+  trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
   content TEXT NOT NULL,
   delivered INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -141,4 +141,13 @@ CREATE TABLE IF NOT EXISTS impulse_states (
   active_events TEXT NOT NULL DEFAULT '[]',
   suppression_count INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- === Long-Term Mood (cross-session emotional memory) ===
+CREATE TABLE IF NOT EXISTS long_term_mood (
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  dimension TEXT NOT NULL,
+  value REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (agent_id, dimension)
 );

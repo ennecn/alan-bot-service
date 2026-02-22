@@ -19,14 +19,14 @@ interface EmotionSnapshot {
 const EMOTION_HISTORY_MAX = 60; // keep ~60 snapshots (1 per check interval)
 
 // Conversation event detection keywords (bilingual)
-const EVENT_PATTERNS: Array<{ pattern: RegExp; event: string; intensity: number }> = [
-  { pattern: /再见|告别|离开|出国|分别|farewell|goodbye|leaving/i, event: 'farewell', intensity: 0.8 },
-  { pattern: /吵架|生气|讨厌你|不理你|conflict|angry|hate/i, event: 'conflict', intensity: 0.7 },
-  { pattern: /想你|好久不见|miss you|missed you/i, event: 'longing', intensity: 0.6 },
-  { pattern: /孤独|寂寞|一个人|lonely|alone/i, event: 'loneliness', intensity: 0.5 },
-  { pattern: /生日|纪念日|birthday|anniversary/i, event: 'celebration', intensity: 0.7 },
-  { pattern: /难过|伤心|哭|sad|crying|tears/i, event: 'distress', intensity: 0.6 },
-  { pattern: /喜欢你|爱你|love you|like you|表白|confession/i, event: 'intimacy', intensity: 0.8 },
+const EVENT_PATTERNS: Array<{ pattern: RegExp; event: string; intensity: number; relevance: number }> = [
+  { pattern: /再见|告别|离开|出国|分别|farewell|goodbye|leaving/i, event: 'farewell', intensity: 0.8, relevance: 0.9 },
+  { pattern: /吵架|生气|讨厌你|不理你|conflict|angry|hate/i, event: 'conflict', intensity: 0.7, relevance: 0.8 },
+  { pattern: /想你|好久不见|miss you|missed you/i, event: 'longing', intensity: 0.6, relevance: 0.9 },
+  { pattern: /孤独|寂寞|一个人|lonely|alone/i, event: 'loneliness', intensity: 0.5, relevance: 0.7 },
+  { pattern: /生日|纪念日|birthday|anniversary/i, event: 'celebration', intensity: 0.7, relevance: 0.8 },
+  { pattern: /难过|伤心|哭|sad|crying|tears/i, event: 'distress', intensity: 0.6, relevance: 0.8 },
+  { pattern: /喜欢你|爱你|love you|like you|表白|confession/i, event: 'intimacy', intensity: 0.8, relevance: 1.0 },
 ];
 
 /**
@@ -118,6 +118,15 @@ export class ProactiveEngine implements Engine {
         SELECT COUNT(*) as cnt FROM proactive_messages
         WHERE agent_id = ? AND delivered = 0
       `),
+      getLongTermMood: this.db.prepare(`
+        SELECT dimension, value FROM long_term_mood WHERE agent_id = ?
+      `),
+      upsertLongTermMood: this.db.prepare(`
+        INSERT INTO long_term_mood (agent_id, dimension, value, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(agent_id, dimension) DO UPDATE SET
+          value = excluded.value, updated_at = excluded.updated_at
+      `),
     };
   }
 
@@ -163,12 +172,14 @@ export class ProactiveEngine implements Engine {
   /** Stop background evaluation */
   stop(agentId?: string): void {
     if (agentId) {
+      this.updateLongTermMood(agentId); // persist long-term mood on session end
       const timer = this.timers.get(agentId);
       if (timer) { clearInterval(timer); this.timers.delete(agentId); }
       this.emotionHistory.delete(agentId);
       this.impulseStates.delete(agentId);
     } else {
       for (const [id, timer] of this.timers) {
+        this.updateLongTermMood(id);
         clearInterval(timer);
       }
       this.timers.clear();
@@ -248,6 +259,37 @@ export class ProactiveEngine implements Engine {
     buf.push({ time: this.now(), state: { ...state } });
     if (buf.length > EMOTION_HISTORY_MAX) buf.shift();
     this.emotionHistory.set(agentId, buf);
+  }
+
+  /** Compute emotion trajectory over a time window */
+  computeTrajectory(agentId: string, windowMs = 2 * 3_600_000): Record<string, { direction: 'rising' | 'falling' | 'stable'; delta: number; durationMin: number }> {
+    const buf = this.emotionHistory.get(agentId);
+    const result: Record<string, { direction: 'rising' | 'falling' | 'stable'; delta: number; durationMin: number }> = {};
+    const axes: Array<keyof EmotionState> = ['pleasure', 'arousal', 'dominance'];
+
+    if (!buf || buf.length < 2) {
+      for (const axis of axes) result[axis] = { direction: 'stable', delta: 0, durationMin: 0 };
+      return result;
+    }
+
+    const now = this.now();
+    const windowStart = now - windowMs;
+    const inWindow = buf.filter(s => s.time >= windowStart);
+    if (inWindow.length < 2) {
+      for (const axis of axes) result[axis] = { direction: 'stable', delta: 0, durationMin: 0 };
+      return result;
+    }
+
+    const first = inWindow[0];
+    const last = inWindow[inWindow.length - 1];
+    const durationMin = (last.time - first.time) / 60_000;
+
+    for (const axis of axes) {
+      const delta = last.state[axis] - first.state[axis];
+      const direction = delta > 0.05 ? 'rising' : delta < -0.05 ? 'falling' : 'stable';
+      result[axis] = { direction, delta, durationMin };
+    }
+    return result;
   }
 
   /**
@@ -345,6 +387,7 @@ export class ProactiveEngine implements Engine {
 
   /** Evaluate both legacy triggers and impulse system (public for debug tick) */
   async evaluateAll(agentId: string): Promise<void> {
+    this.recordEmotionSnapshot(agentId); // ensure manual ticks also record snapshots
     await this.evaluateTriggers(agentId);
     const agent = this.identity.getAgent(agentId);
     if (agent?.card.proactive?.impulse?.enabled) {
@@ -366,23 +409,76 @@ export class ProactiveEngine implements Engine {
   }
 
   /** Inject an event into the impulse system (from API or conversation detection) */
-  addActiveEvent(agentId: string, name: string, intensity: number, decayRate = 0.5): void {
+  addActiveEvent(agentId: string, name: string, intensity: number, decayRate = 0.5, relevance = 0.8): void {
     const state = this.impulseStates.get(agentId);
     if (!state) return;
+    const now = this.now();
     // Don't duplicate — refresh intensity if same event exists
     const existing = state.activeEvents.find(e => e.name === name);
     if (existing) {
-      existing.intensity = Math.max(existing.intensity, intensity);
-      existing.createdAt = this.now();
+      // Event cooldown: if same event within 10 minutes, reduce new intensity by 50%
+      const minutesSince = (now - existing.createdAt) / 60_000;
+      const effectiveIntensity = minutesSince < 10 ? intensity * 0.5 : intensity;
+      existing.intensity = Math.max(existing.intensity, effectiveIntensity);
+      existing.relevance = Math.max(existing.relevance, relevance);
+      existing.createdAt = now;
     } else {
-      state.activeEvents.push({ name, intensity, createdAt: this.now(), decayRate });
+      state.activeEvents.push({ name, intensity, relevance, createdAt: now, decayRate });
     }
-    console.log(`[Impulse] Event '${name}' (intensity=${intensity}) added for ${agentId}`);
+    console.log(`[Impulse] Event '${name}' (intensity=${intensity}, relevance=${relevance}) added for ${agentId}`);
   }
 
   /** Get current impulse state (for debug endpoint) */
   getImpulseState(agentId: string): ImpulseState | undefined {
     return this.impulseStates.get(agentId);
+  }
+
+  /** Get long-term mood from DB */
+  getLongTermMood(agentId: string): Record<string, number> {
+    const rows = this.stmts.getLongTermMood.all(agentId) as Array<{ dimension: string; value: number }>;
+    const result: Record<string, number> = {};
+    for (const r of rows) result[r.dimension] = r.value;
+    return result;
+  }
+
+  /** Update long-term mood via EMA (called on session end) */
+  updateLongTermMood(agentId: string): void {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) return;
+    const dimensions = agent.card.emotion?.longTermDimensions ?? ['attachment', 'trust'];
+    const moodInertia = agent.card.emotion?.moodInertia ?? 0.9;
+    const alpha = 1 - moodInertia;
+
+    const buf = this.emotionHistory.get(agentId);
+    if (!buf || buf.length === 0) return;
+
+    // Compute session average PAD
+    const avg = { pleasure: 0, arousal: 0, dominance: 0 };
+    for (const snap of buf) {
+      avg.pleasure += snap.state.pleasure;
+      avg.arousal += snap.state.arousal;
+      avg.dominance += snap.state.dominance;
+    }
+    avg.pleasure /= buf.length;
+    avg.arousal /= buf.length;
+    avg.dominance /= buf.length;
+
+    // Map dimensions to PAD axes (simple heuristic)
+    const dimToValue = (dim: string): number => {
+      switch (dim) {
+        case 'attachment': return (avg.pleasure + avg.arousal) / 2;
+        case 'trust': return (avg.pleasure + avg.dominance) / 2;
+        default: return avg.pleasure; // fallback
+      }
+    };
+
+    const current = this.getLongTermMood(agentId);
+    for (const dim of dimensions) {
+      const sessionVal = dimToValue(dim);
+      const oldVal = current[dim] ?? 0;
+      const newVal = alpha * sessionVal + (1 - alpha) * oldVal;
+      this.stmts.upsertLongTermMood.run(agentId, dim, newVal);
+    }
   }
 
   /** Core impulse evaluation — called every check interval */
@@ -409,9 +505,9 @@ export class ProactiveEngine implements Engine {
       if (e.intensity < 0.05) state.activeEvents.splice(i, 1);
     }
 
-    // 2. Compute event gate (max intensity of active events)
+    // 2. Compute event gate (max intensity × relevance of active events)
     const eventGate = state.activeEvents.length > 0
-      ? Math.max(...state.activeEvents.map(e => e.intensity))
+      ? Math.max(...state.activeEvents.map(e => e.intensity * e.relevance))
       : 0;
 
     // 3. Compute gain from all signals
@@ -464,9 +560,25 @@ export class ProactiveEngine implements Engine {
         return this.computeIdleActivation(agentId, signal.idleMinutes ?? 60);
       case 'time_of_day':
         return this.computeTimeActivation(signal.timeRange);
+      case 'emotion_pressure':
+        return this.computeEmotionPressureActivation(agentId);
       default:
         return 0;
     }
+  }
+
+  /** Compute emotion pressure: distance from baseline (not gated by events) */
+  private computeEmotionPressureActivation(agentId: string): number {
+    const state = this.emotion.getState(agentId);
+    if (!state) return 0;
+    const agent = this.identity.getAgent(agentId);
+    const baseline = agent?.card.emotion?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    const dist = Math.sqrt(
+      (state.pleasure - baseline.pleasure) ** 2 +
+      (state.arousal - baseline.arousal) ** 2 +
+      (state.dominance - baseline.dominance) ** 2
+    );
+    return Math.min(1, dist / 1.0); // normalize, max distance ≈ √3
   }
 
   /** Check if all conditions in an emotion pattern are satisfied */
@@ -529,45 +641,107 @@ export class ProactiveEngine implements Engine {
   }
 
   /** Detect conversation events from message text */
-  private detectConversationEvents(text: string): Array<{ name: string; intensity: number }> {
-    const events: Array<{ name: string; intensity: number }> = [];
-    for (const { pattern, event, intensity } of EVENT_PATTERNS) {
+  private detectConversationEvents(text: string): Array<{ name: string; intensity: number; relevance: number }> {
+    const events: Array<{ name: string; intensity: number; relevance: number }> = [];
+    for (const { pattern, event, intensity, relevance } of EVENT_PATTERNS) {
       if (pattern.test(text)) {
-        events.push({ name: event, intensity });
+        events.push({ name: event, intensity, relevance });
       }
     }
     return events;
+  }
+
+  /** Determine dominant trigger type from signal contributions */
+  private determineTriggerType(agentId: string, impulseConfig: NonNullable<NonNullable<import('../../types.js').MetroidCard['proactive']>['impulse']>): string {
+    const contributions: Record<string, number> = {};
+    for (const signal of impulseConfig.signals) {
+      const activation = this.computeSignalActivation(agentId, signal);
+      const key = signal.type === 'emotion_pattern' || signal.type === 'emotion_pressure' ? 'emotion' : signal.type;
+      contributions[key] = (contributions[key] ?? 0) + signal.weight * activation;
+    }
+    const sorted = Object.entries(contributions).sort((a, b) => b[1] - a[1]);
+    if (sorted.length === 0) return 'impulse:mixed';
+    const top = sorted[0];
+    if (sorted.length > 1 && sorted[1][1] > top[1] * 0.5) return 'impulse:mixed';
+    if (top[0] === 'idle') return 'impulse:idle';
+    if (top[0] === 'emotion') return 'impulse:emotion';
+    return 'impulse:mixed';
+  }
+
+  /** Format structured internal state XML for LLM prompt */
+  private formatInternalState(agentId: string, agent: AgentIdentity, state: ImpulseState): string {
+    const trajectory = this.computeTrajectory(agentId);
+    const longTermMood = this.getLongTermMood(agentId);
+    const lastActive = this.lastActivity.get(agentId) ?? this.now();
+    const idleMin = Math.round((this.now() - lastActive) / 60_000);
+
+    const dirLabel = (d: string) => d === 'rising' ? '上升中' : d === 'falling' ? '下降中' : '平稳';
+
+    let xml = '<internal_state>\n  <emotion_trajectory>\n';
+    for (const axis of ['pleasure', 'arousal', 'dominance'] as const) {
+      const t = trajectory[axis];
+      xml += `    ${axis}: ${t.delta >= 0 ? '+' : ''}${t.delta.toFixed(2)} (${dirLabel(t.direction)}`;
+      if (t.durationMin > 0) xml += `, 过去${Math.round(t.durationMin)}分钟`;
+      xml += ')\n';
+    }
+    xml += '  </emotion_trajectory>\n';
+
+    if (Object.keys(longTermMood).length > 0) {
+      xml += '  <long_term_mood>\n';
+      for (const [dim, val] of Object.entries(longTermMood)) {
+        xml += `    ${dim}: ${val.toFixed(2)}\n`;
+      }
+      xml += '  </long_term_mood>\n';
+    }
+
+    if (state.activeEvents.length > 0) {
+      xml += '  <active_events>\n';
+      for (const e of state.activeEvents) {
+        const agoMin = Math.round((this.now() - e.createdAt) / 60_000);
+        const relLabel = e.relevance >= 0.8 ? '高度相关' : e.relevance >= 0.5 ? '相关' : '间接相关';
+        xml += `    ${e.name} (强度${e.intensity.toFixed(1)}, ${relLabel}, ${agoMin}分钟前)\n`;
+      }
+      xml += '  </active_events>\n';
+    }
+
+    xml += '  <trigger_context>\n';
+    xml += `    冲动强度: ${(state.value * 100).toFixed(0)}%\n`;
+    if (state.suppressionCount > 0) {
+      xml += `    已抑制: ${state.suppressionCount}次\n`;
+    }
+    if (idleMin > 0) {
+      xml += `    沉默时长: ${idleMin}分钟\n`;
+    }
+    xml += '  </trigger_context>\n</internal_state>';
+    return xml;
   }
 
   /** Fire impulse: generate proactive message with context-rich prompt */
   private async fireImpulse(agentId: string, agent: AgentIdentity, state: ImpulseState): Promise<void> {
     if (!this.generateFn) return;
 
-    const emotionState = this.emotion.getState(agentId);
-    const events = state.activeEvents.map(e => e.name).join(', ') || '内心积累';
-    const emotionDesc = emotionState
-      ? `P=${emotionState.pleasure.toFixed(2)} A=${emotionState.arousal.toFixed(2)} D=${emotionState.dominance.toFixed(2)}`
-      : 'unknown';
-
+    const internalState = this.formatInternalState(agentId, agent, state);
     const promptTemplate = agent.card.proactive?.impulse?.promptTemplate ?? '基于当前内心状态，自然地主动发一条消息。';
-    const prompt = `${promptTemplate}\n\n<internal_state>\n当前情绪: ${emotionDesc}\n触发因素: ${events}\n冲动强度: ${(state.value * 100).toFixed(0)}%\n</internal_state>\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
+    const prompt = `${promptTemplate}\n\n${internalState}\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
 
-    console.log(`[Impulse] Firing for ${agent.name} (impulse=${state.value.toFixed(3)}, events=[${events}])`);
+    const triggerType = this.determineTriggerType(agentId, agent.card.proactive!.impulse!);
+    const events = state.activeEvents.map(e => e.name).join(', ') || '内心积累';
+    console.log(`[Impulse] Firing for ${agent.name} (impulse=${state.value.toFixed(3)}, type=${triggerType}, events=[${events}])`);
 
     try {
       const content = await this.generateFn(agentId, prompt);
       if (!content || content.length < 2) return;
 
       const id = `impulse-${agentId}-${this.now()}`;
-      this.stmts.insertMessage.run(id, agentId, 'impulse', 'emotion', content);
-      this.notifyMessage(agentId, id, 'impulse', 'emotion', content);
+      this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, content);
+      this.notifyMessage(agentId, id, 'impulse', triggerType, content);
 
       await this.audit.log({
         timestamp: this.nowDate(),
         actor: `agent:${agentId}`,
         action: 'proactive.impulse_fire',
         target: id,
-        details: { impulse: state.value, events: state.activeEvents.map(e => e.name), emotion: emotionState },
+        details: { impulse: state.value, triggerType, events: state.activeEvents.map(e => e.name), emotion: this.emotion.getState(agentId) },
       });
     } catch (err) {
       console.error(`[Impulse] Failed to generate message:`, err);
@@ -664,7 +838,7 @@ export class ProactiveEngine implements Engine {
     // Detect conversation events and inject into impulse system
     const events = this.detectConversationEvents(context.message.content);
     for (const e of events) {
-      this.addActiveEvent(context.agentId, e.name, e.intensity);
+      this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
     }
   }
 
