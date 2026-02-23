@@ -149,12 +149,20 @@
   - F2: 7 tests (初始化/积累/衰减/截断/breach 激活/breach 未达阈值/prompt 显示)
   - F3: 4 tests (fire 后 awaiting/正面反馈/忽略反馈/初始化)
   - F4: 5 tests (无 pool 不触发/概率触发/共鸣门控/灵感标签/向后兼容)
+- **ST 卡导入器增强**: PNG/JSON 导入自动填充 V4 proactive 字段
+  - impulse signals: idle(0.6) + emotion_pressure(0.3) + memory_breach(0.2)
+  - `extractSparkPool()` — 从卡片描述/性格自动提取 CJK 关键词作为灵感池
+  - memoryBreach/sparkResonance 配置使用合理默认值
+- **分布式测试脚本**: `tests/distributed/proactive-v4-behavioral.py` (631 行)
+  - 7 个场景对比 V2 vs V4 prompt 格式 (蓄水池决堤/灵感闪现/怀旧共鸣/正面反馈/被忽略/认知放大/全特性)
+  - LLM judge 4 维度评估 + 暗色主题 HTML 报告
+- 设计文档: `metroid/docs/proactive-v4-design.md`
 
 ### 测试现状 (2026-02-23)
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| Passed | 170 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 + 7 个 E2E + 21 个 V4 行为动力学测试) |
-| Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
+| Passed | 178 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 + 7 个 E2E + 21 个 V4 + 8 个 importer) |
+| Failed | 0 | forgetter/growth bug 已修复 |
 | Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
 ---
@@ -198,7 +206,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| Proactive Engine 测试 | ✅ 170 tests (V1 84 + V2 30 + V3 28 + E2E 7 + V4 21), 全覆盖 |
+| Proactive Engine 测试 | ✅ 178 tests (V1 84 + V2 30 + V3 28 + E2E 7 + V4 21 + importer 8), 全覆盖 |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
 | Social Engine 测试 | 关系更新无测试 |

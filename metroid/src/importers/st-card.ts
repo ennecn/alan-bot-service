@@ -1,6 +1,17 @@
 import { extractPngText } from './png-parser.js';
 import type { MetroidCard, RpMode } from '../types.js';
 
+/** Extract thematic keywords from card text for V4 sparkPool */
+function extractSparkPool(description: string, personality: string): string[] {
+  const text = `${description}\n${personality}`;
+  // Match CJK noun phrases (2-4 chars) and English nouns that appear thematic
+  const cjkMatches = text.match(/[\u4e00-\u9fff]{2,4}/g) || [];
+  // Deduplicate, filter stopwords, take top 8
+  const stopwords = new Set(['一个','这个','那个','什么','可以','不会','因为','所以','但是','如果','已经','自己','他们','我们','你们','没有','不是','就是','还是','虽然','或者','而且','以及','关于','通过','对于']);
+  const unique = [...new Set(cjkMatches)].filter(w => !stopwords.has(w));
+  return unique.slice(0, 8);
+}
+
 /** Detect rpMode from card content — checks for NSFW indicators */
 function detectRpMode(description: string, firstMes: string, mesExample: string): RpMode {
   const text = `${description}\n${firstMes}\n${mesExample}`;
@@ -138,6 +149,28 @@ export function importSTCardFromPng(pngPath: string, userName = '用户'): STCar
       maxDrift: 0.3,
       logChanges: true,
     },
+    // V4: Proactive defaults — enables behavioral dynamics testing
+    proactive: {
+      enabled: true,
+      triggers: [],
+      impulse: {
+        enabled: true,
+        signals: [
+          { type: 'idle', weight: 0.6, idleMinutes: 30 },
+          { type: 'emotion_pressure', weight: 0.3 },
+          { type: 'memory_breach', weight: 0.2 },
+        ],
+        decayRate: 0.1,
+        fireThreshold: 0.6,
+        cooldownMinutes: 15,
+        promptTemplate: '基于当前内心状态，以角色的口吻自然地发起对话。',
+        memoryBreachThreshold: 0.7,
+        memoryPressureDecayRate: 0.02,
+        sparkPool: extractSparkPool(d.description, d.personality),
+        sparkProbability: 0.08,
+        sparkResonanceThreshold: 0.4,
+      },
+    },
   };
 
   // Extract linked world book name
@@ -193,6 +226,27 @@ export function importSTCardFromJson(jsonPath: string, userName = '用户'): STC
     },
     memoryStyle: { encodingRate: 0.3, forgettingCurve: 'normal', nostalgiaTendency: 0.5 },
     growth: { enabled: true, maxDrift: 0.3, logChanges: true },
+    proactive: {
+      enabled: true,
+      triggers: [],
+      impulse: {
+        enabled: true,
+        signals: [
+          { type: 'idle', weight: 0.6, idleMinutes: 30 },
+          { type: 'emotion_pressure', weight: 0.3 },
+          { type: 'memory_breach', weight: 0.2 },
+        ],
+        decayRate: 0.1,
+        fireThreshold: 0.6,
+        cooldownMinutes: 15,
+        promptTemplate: '基于当前内心状态，以角色的口吻自然地发起对话。',
+        memoryBreachThreshold: 0.7,
+        memoryPressureDecayRate: 0.02,
+        sparkPool: extractSparkPool(d.description || '', d.personality || ''),
+        sparkProbability: 0.08,
+        sparkResonanceThreshold: 0.4,
+      },
+    },
   };
 
   const warnings: string[] = [];
