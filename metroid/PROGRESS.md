@@ -75,7 +75,7 @@
 - 设计文档: `metroid/docs/proactive-v2-design.md`
 - 核心目标: impulse 触发时的 LLM prompt 从薄弱的 "P=0.3 A=0.1" 变成富含上下文的结构化舞台指令
 - 类型扩展: ActiveEvent.relevance, ImpulseSignal.emotion_pressure, MetroidCard.emotion.moodInertia/longTermDimensions
-- DB: 新增 long_term_mood 表, 放宽 trigger_type CHECK (impulse:idle/emotion/mixed)
+- DB: 新增 long_term_mood 表, 放宽 trigger_type CHECK (impulse:idle/emotion/mixed), 含迁移脚本
 - 引擎改动:
   - evaluateAll 快照一致性修复 (手动 tick 也录入快照)
   - computeTrajectory() — 情绪轨迹计算 (rising/falling/stable)

@@ -468,7 +468,7 @@ export class ProactiveEngine implements Engine {
       switch (dim) {
         case 'attachment': return (avg.pleasure + avg.arousal) / 2;
         case 'trust': return (avg.pleasure + avg.dominance) / 2;
-        default: return avg.pleasure; // fallback
+        default: console.warn(`[LongTermMood] Unknown dimension '${dim}', falling back to pleasure`); return avg.pleasure;
       }
     };
 
@@ -578,7 +578,7 @@ export class ProactiveEngine implements Engine {
       (state.arousal - baseline.arousal) ** 2 +
       (state.dominance - baseline.dominance) ** 2
     );
-    return Math.min(1, dist / 1.0); // normalize, max distance ≈ √3
+    return Math.min(1, dist / 1.0); // saturates early: dist=1 → full activation (intentionally sensitive)
   }
 
   /** Check if all conditions in an emotion pattern are satisfied */

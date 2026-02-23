@@ -59,7 +59,7 @@ export function getDb(config: MetroidConfig): Database.Database {
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL REFERENCES agents(id),
       trigger_id TEXT NOT NULL,
-      trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event')),
+      trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
       content TEXT NOT NULL,
       delivered INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -67,6 +67,27 @@ export function getDb(config: MetroidConfig): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_proactive_agent_pending
       ON proactive_messages(agent_id, delivered, created_at DESC);
   `);
+
+  // Migration: update proactive_messages CHECK constraint for V2 trigger types
+  const pmSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='proactive_messages'").get() as any)?.sql ?? '';
+  if (pmSql && !pmSql.includes('impulse:idle')) {
+    db.exec(`
+      CREATE TABLE proactive_messages_new (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL REFERENCES agents(id),
+        trigger_id TEXT NOT NULL,
+        trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
+        content TEXT NOT NULL,
+        delivered INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO proactive_messages_new SELECT * FROM proactive_messages;
+      DROP TABLE proactive_messages;
+      ALTER TABLE proactive_messages_new RENAME TO proactive_messages;
+      CREATE INDEX IF NOT EXISTS idx_proactive_agent_pending
+        ON proactive_messages(agent_id, delivered, created_at DESC);
+    `);
+  }
 
   // Migration: add impulse_states table
   db.exec(`
@@ -78,6 +99,17 @@ export function getDb(config: MetroidConfig): Database.Database {
       active_events TEXT NOT NULL DEFAULT '[]',
       suppression_count INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Migration: add long_term_mood table for cross-session emotional memory
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS long_term_mood (
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      dimension TEXT NOT NULL,
+      value REAL NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (agent_id, dimension)
     );
   `);
 
