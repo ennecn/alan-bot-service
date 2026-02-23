@@ -98,7 +98,7 @@ export class GraphRAG {
   findRelatedEntities(agentId: string, entities: string[], limit = 20): string[] {
     const related = new Set<string>();
     for (const entity of entities) {
-      const rows = this.stmts.findConnected.all(agentId, entity, agentId, entity, entity, limit) as any[];
+      const rows = this.stmts.findConnected.all(entity, agentId, entity, entity, limit) as any[];
       for (const r of rows) {
         related.add(r.connected);
       }

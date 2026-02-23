@@ -19,6 +19,13 @@ tsconfig.tsbuildinfo
 # === Sensitive data ===
 accounts.json
 accounts_extracted/
+*.secrets
+env.secrets
+.env.secrets
+.env
+store.json
+vault.json.age
+.credentials/
 
 # === Nested git repos ===
 openclaw_repo/

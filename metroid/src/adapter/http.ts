@@ -37,12 +37,15 @@ import { fileURLToPath } from 'url';
 import { Metroid, ChatResult, CompareResult } from '../index.js';
 import type { MetroidMessage, AgentMode, ProactiveMessage } from '../types.js';
 import type { Socket } from 'net';
+import { TestCoordinator } from '../testing/coordinator.js';
+import { ResultAggregator } from '../testing/aggregator.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '8100');
 const DATA_DIR = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
 const LOG_DIR = resolve(DATA_DIR, 'logs');
 const API_TOKEN = process.env.METROID_API_TOKEN || '';
+const BIND_HOST = process.env.METROID_BIND_HOST || '127.0.0.1';
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 
 // Ensure log directory exists
@@ -424,6 +427,8 @@ function matchRoute(method: string, url: string): { handler: Handler; params: Re
 
 let metroid: Metroid;
 let msgCounter = 0;
+let testCoordinator: TestCoordinator;
+const testAggregator = new ResultAggregator();
 
 function init() {
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_BASE_URL) {
@@ -451,6 +456,9 @@ function init() {
   for (const agent of metroid.getAllAgents()) {
     metroid.start(agent.id);
   }
+
+  // Initialize test coordinator
+  testCoordinator = new TestCoordinator(DATA_DIR);
 
   // Push proactive messages to WS clients
   metroid.onProactiveMessage((agentId: string, msg: ProactiveMessage) => {
@@ -750,6 +758,8 @@ route('POST', '/agents/:id/config', async (req, res, { id }) => {
   const applied: Record<string, unknown> = {};
   if (body.openaiModel !== undefined) { metroid.updateLLMConfig({ openaiModel: body.openaiModel }); applied.openaiModel = body.openaiModel; }
   if (body.openaiModelFallback !== undefined) { metroid.updateLLMConfig({ openaiModelFallback: body.openaiModelFallback }); applied.openaiModelFallback = body.openaiModelFallback; }
+  if (body.openaiBaseUrl !== undefined) { metroid.updateLLMConfig({ openaiBaseUrl: body.openaiBaseUrl }); applied.openaiBaseUrl = body.openaiBaseUrl; }
+  if (body.openaiApiKey !== undefined) { metroid.updateLLMConfig({ openaiApiKey: body.openaiApiKey }); applied.openaiApiKey = '***'; }
   if (body.rpMode && ['off', 'sfw', 'nsfw'].includes(body.rpMode)) { metroid.setRpMode(id, body.rpMode); applied.rpMode = body.rpMode; }
   if (body.mode && ['classic', 'enhanced'].includes(body.mode)) { metroid.setAgentMode(id, body.mode); applied.mode = body.mode; }
   json(res, { ok: true, applied });
@@ -839,6 +849,76 @@ route('POST', '/agents/:id/growth/:changeId/revert', (_req, res, { id, changeId 
 route('GET', '/debug/config', (_req, res) => {
   const llm = metroid.getLLMConfig();
   json(res, { llm });
+});
+
+// === Distributed Test Job Endpoints ===
+
+route('POST', '/test/jobs', async (req, res) => {
+  const body = await readBody(req);
+  if (!body.scenario) return error(res, 'scenario required');
+  try {
+    const job = testCoordinator.createJob(body.scenario, body.config || {});
+    json(res, { job }, 201);
+  } catch (err: any) {
+    error(res, err.message, 400);
+  }
+});
+
+route('GET', '/test/jobs', (req, res) => {
+  const url = new URL(req.url!, `http://localhost`);
+  const limit = parseInt(url.searchParams.get('limit') || '20');
+  const jobs = testCoordinator.listJobs(limit);
+  json(res, {
+    jobs: jobs.map(j => ({
+      id: j.id, scenario: j.scenario, status: j.status,
+      createdAt: j.createdAt,
+      subtasks: j.subtasks.length,
+      done: j.subtasks.filter(st => st.status === 'done').length,
+      failed: j.subtasks.filter(st => st.status === 'failed').length,
+    })),
+  });
+});
+
+route('GET', '/test/jobs/:id', (_req, res, { id }) => {
+  const job = testCoordinator.getJob(id);
+  if (!job) return error(res, 'job not found', 404);
+  json(res, { job });
+});
+
+route('POST', '/test/jobs/:id/claim', async (req, res, { id }) => {
+  const body = await readBody(req);
+  if (!body.worker) return error(res, 'worker name required');
+  const subtask = testCoordinator.claimSubtask(id, body.worker);
+  if (!subtask) return error(res, 'no pending subtasks', 404);
+  json(res, { subtask });
+});
+
+route('POST', '/test/jobs/:id/submit', async (req, res, { id }) => {
+  const body = await readBody(req);
+  if (!body.subtaskId || !body.result) return error(res, 'subtaskId and result required');
+  try {
+    testCoordinator.submitResult(id, body.subtaskId, body.result);
+    const job = testCoordinator.getJob(id);
+    json(res, { ok: true, jobStatus: job?.status });
+  } catch (err: any) {
+    error(res, err.message, 400);
+  }
+});
+
+route('GET', '/test/jobs/:id/report', (_req, res, { id }) => {
+  const job = testCoordinator.getJob(id);
+  if (!job) return error(res, 'job not found', 404);
+  const url = new URL(`http://localhost${_req.url}`);
+  const format = url.searchParams.get('format') || 'html';
+  if (format === 'json') {
+    const report = testAggregator.aggregate(job);
+    if (!report) return error(res, 'no results yet', 404);
+    json(res, { report });
+  } else {
+    const html = testAggregator.generateHTML(job);
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  }
 });
 
 // === Compare Test Storage ===
@@ -1000,10 +1080,10 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, BIND_HOST, () => {
   const agents = metroid.getAllAgents();
-  console.log(`[Metroid Adapter] Listening on http://127.0.0.1:${PORT}`);
-  console.log(`[Metroid Adapter] WebSocket: ws://127.0.0.1:${PORT}`);
+  console.log(`[Metroid Adapter] Listening on http://${BIND_HOST}:${PORT}`);
+  console.log(`[Metroid Adapter] WebSocket: ws://${BIND_HOST}:${PORT}`);
   console.log(`[Metroid Adapter] Data: ${DATA_DIR}`);
   console.log(`[Metroid Adapter] Agents: ${agents.length}`);
   agents.forEach(a => console.log(`  - ${a.name} (${a.id}) [${a.mode}]`));

@@ -669,9 +669,11 @@ Reply in JSON only:
   }
 
   /** Update LLM config at runtime (session-only, not persisted) */
-  updateLLMConfig(updates: { openaiModel?: string; openaiModelFallback?: string }): void {
+  updateLLMConfig(updates: { openaiModel?: string; openaiModelFallback?: string; openaiBaseUrl?: string; openaiApiKey?: string }): void {
     if (updates.openaiModel !== undefined) this.config.llm.openaiModel = updates.openaiModel;
     if (updates.openaiModelFallback !== undefined) this.config.llm.openaiModelFallback = updates.openaiModelFallback;
+    if (updates.openaiBaseUrl !== undefined) this.config.llm.openaiBaseUrl = updates.openaiBaseUrl;
+    if (updates.openaiApiKey !== undefined) this.config.llm.openaiApiKey = updates.openaiApiKey;
     console.log(`[Metroid] LLM config updated:`, updates);
   }
 

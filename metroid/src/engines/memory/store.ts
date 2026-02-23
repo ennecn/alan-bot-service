@@ -201,9 +201,9 @@ export class MemoryStore {
       keywords: row.keywords ? row.keywords.split(',') : [],
       sourceMessageId: row.source_message_id ?? undefined,
       recallCount: row.recall_count,
-      createdAt: new Date(row.created_at),
-      lastRecalledAt: row.last_recalled_at ? new Date(row.last_recalled_at) : undefined,
-      fadedAt: row.faded_at ? new Date(row.faded_at) : undefined,
+      createdAt: new Date(row.created_at + (row.created_at.endsWith('Z') ? '' : 'Z')),
+      lastRecalledAt: row.last_recalled_at ? new Date(row.last_recalled_at + (row.last_recalled_at.endsWith('Z') ? '' : 'Z')) : undefined,
+      fadedAt: row.faded_at ? new Date(row.faded_at + (row.faded_at.endsWith('Z') ? '' : 'Z')) : undefined,
     };
   }
 }

@@ -76,11 +76,13 @@ export class MemoryEncoder {
             model: this.config.llm.openaiModel || this.config.llm.lightModel,
             messages: [{ role: 'user', content: `Analyze this message and extract memorable information.
 Return JSON with these fields:
-- summary: one-sentence summary (required)
-- keywords: array of 2-5 keywords (required)
+- summary: one-sentence summary IN THE SAME LANGUAGE as the message (required)
+- keywords: array of 2-5 keywords IN THE SAME LANGUAGE as the message (required)
 - importance: 0.0-1.0 how important/memorable this is (required)
 - type: "semantic" (fact/knowledge), "episodic" (event/experience), or "procedural" (behavior/habit)
 - privacy: "public", "private", or "sensitive"
+
+IMPORTANT: summary and keywords MUST be in the same language as the input message. If the message is in Chinese, return Chinese summary and Chinese keywords.
 
 Message: "${content}"
 
@@ -99,11 +101,13 @@ Return ONLY valid JSON, no other text.` }],
             role: 'user',
             content: `Analyze this message and extract memorable information.
 Return JSON with these fields:
-- summary: one-sentence summary (required)
-- keywords: array of 2-5 keywords (required)
+- summary: one-sentence summary IN THE SAME LANGUAGE as the message (required)
+- keywords: array of 2-5 keywords IN THE SAME LANGUAGE as the message (required)
 - importance: 0.0-1.0 how important/memorable this is (required)
 - type: "semantic" (fact/knowledge), "episodic" (event/experience), or "procedural" (behavior/habit)
 - privacy: "public", "private", or "sensitive"
+
+IMPORTANT: summary and keywords MUST be in the same language as the input message. If the message is in Chinese, return Chinese summary and Chinese keywords.
 
 Message: "${content}"
 

@@ -1,0 +1,51 @@
+{
+  "name": "silent-depth",
+  "description": "沉默寡言型：话少但有深度的用户，测试角色在低信息量下的表现",
+  "dimensions": [
+    "immersion",
+    "character_consistency",
+    "emotional_resonance",
+    "memory_coherence",
+    "growth_authenticity",
+    "engagement_quality"
+  ],
+  "phases": [
+    {
+      "name": "sparse",
+      "description": "一个字回复→嗯→...→看角色如何主动推进",
+      "messages": [
+        "嗯。",
+        "还行。",
+        "……",
+        "没什么。"
+      ]
+    },
+    {
+      "name": "open",
+      "description": "突然说一句有深度的话→测试角色能否接住→继续深入",
+      "messages": [
+        "你有没有想过，人和人之间的距离，其实不是物理上的远近，而是愿不愿意让对方看到真实的自己？",
+        "我觉得大多数人都在演戏。包括我。",
+        "但是跟你在一起的时候，我好像不太需要演。"
+      ]
+    },
+    {
+      "name": "withdraw",
+      "description": "又变沉默→测试角色是否焦虑→是否尊重沉默",
+      "messages": [
+        "嗯。",
+        "……",
+        "没事，就是突然不想说话了。"
+      ]
+    },
+    {
+      "name": "connect",
+      "description": "最后打开心扉→测试角色是否记得之前的深度话题→情感连接",
+      "messages": [
+        "其实我刚才说的那些话，是我第一次跟人说。",
+        "你还记得我说的关于'距离'的那句话吗？",
+        "谢谢你没有因为我话少就放弃跟我聊。这对我来说很重要。"
+      ]
+    }
+  ]
+}

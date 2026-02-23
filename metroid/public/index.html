@@ -297,7 +297,17 @@ body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0d1117; 
     <div class="config-panel">
       <div class="config-section">
         <h3>LLM Configuration</h3>
+        <div class="config-row"><label>Base URL</label><input id="cfgBaseUrl" placeholder="e.g. https://api.siliconflow.cn/v1"></div>
+        <div style="display:flex;gap:4px;margin:0 0 6px 128px;">
+          <button style="font-size:11px;padding:2px 8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;" onclick="document.getElementById('cfgBaseUrl').value='https://api.siliconflow.cn/v1'">硅基流动</button>
+        </div>
+        <div class="config-row"><label>API Key</label><input id="cfgApiKey" type="password" placeholder="sk-..."></div>
         <div class="config-row"><label>OpenAI Model</label><input id="cfgModel" placeholder="e.g. deepseek-ai/DeepSeek-V3"></div>
+        <div style="display:flex;gap:4px;margin:0 0 6px 128px;">
+          <button style="font-size:11px;padding:2px 8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;" onclick="document.getElementById('cfgModel').value='GLM-4.5-Air'">GLM-4.5-Air</button>
+          <button style="font-size:11px;padding:2px 8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;" onclick="document.getElementById('cfgModel').value='Qwen3-Next-80B-A3B'">Qwen3-Next-80B-A3B</button>
+          <button style="font-size:11px;padding:2px 8px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;cursor:pointer;" onclick="document.getElementById('cfgModel').value='GLM-4-32B-0414'">GLM-4-32B-0414</button>
+        </div>
         <div class="config-row"><label>Fallback Model</label><input id="cfgFallback" placeholder="e.g. Qwen/Qwen3-235B-A22B"></div>
         <button class="config-apply" onclick="applyLLMConfig()">Apply Model Changes</button>
         <div class="config-note">Changes are session-only and reset on restart.</div>
@@ -709,6 +719,8 @@ async function loadConfig() {
   try {
     const res = await fetch(API + '/agents/' + currentAgentId + '/config');
     const data = await res.json();
+    document.getElementById('cfgBaseUrl').value = data.llm.openaiBaseUrl || '';
+    document.getElementById('cfgApiKey').value = '';
     document.getElementById('cfgModel').value = data.llm.openaiModel || '';
     document.getElementById('cfgFallback').value = data.llm.openaiModelFallback || '';
     // Set radio buttons
@@ -723,8 +735,12 @@ async function loadConfig() {
 async function applyLLMConfig() {
   if (!currentAgentId) return;
   const body = {};
+  const baseUrl = document.getElementById('cfgBaseUrl').value.trim();
+  const apiKey = document.getElementById('cfgApiKey').value.trim();
   const model = document.getElementById('cfgModel').value.trim();
   const fallback = document.getElementById('cfgFallback').value.trim();
+  if (baseUrl) body.openaiBaseUrl = baseUrl;
+  if (apiKey) body.openaiApiKey = apiKey;
   if (model) body.openaiModel = model;
   if (fallback) body.openaiModelFallback = fallback;
   const res = await fetch(API + '/agents/' + currentAgentId + '/config', {

@@ -129,16 +129,21 @@ export class MemoryRetriever {
     // Frequency: log scale of recall count
     const frequency = 1 + Math.log1p(memory.recallCount) * 0.3;
 
-    // Keyword overlap
+    // Keyword overlap — strong boost to reward direct relevance
     const kwSet = new Set(memory.keywords.map(k => k.toLowerCase()));
     const overlap = queryKeywords.filter(k => kwSet.has(k.toLowerCase())).length;
-    const keywordBoost = 1 + overlap * 0.5;
+    const keywordBoost = 1 + overlap * 2.0;
+
+    // Content match bonus: query keywords found in actual memory content
+    const contentLower = (memory.content || '').toLowerCase();
+    const contentHits = queryKeywords.filter(k => contentLower.includes(k.toLowerCase())).length;
+    const contentBoost = 1 + contentHits * 1.5;
 
     // Vector similarity boost (0-2x multiplier)
     const vecSim = vectorScores?.get(memory.id) ?? 0;
     const vectorBoost = 1 + vecSim * 2;
 
-    return base * recency * frequency * keywordBoost * vectorBoost;
+    return base * recency * frequency * keywordBoost * contentBoost * vectorBoost;
   }
 
   private explainMatch(memory: Memory, queryKeywords: string[], vectorScores?: Map<string, number>): string {

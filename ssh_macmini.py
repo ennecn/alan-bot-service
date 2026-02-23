@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-import paramiko
-import sys
+"""DEPRECATED: Use ssh_cmd.py instead.
+   python ssh_cmd.py macmini "command"
+   python ssh_cmd.py macmini -f script.sh
 
-def run_cmd(cmd):
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect('192.168.21.111', username='fangjin', password='YYZZ54321!')
-    stdin, stdout, stderr = client.exec_command(cmd)
-    out = stdout.read().decode()
-    err = stderr.read().decode()
-    client.close()
-    if out:
-        print(out)
-    if err:
-        print(err, file=sys.stderr)
+This file is kept as a thin wrapper for backward compatibility.
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ssh_cmd import run, run_cmd, run_file
 
-if __name__ == '__main__':
-    cmd = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else 'docker ps --format "table {{.Names}}\\t{{.Status}}"'
-    run_cmd(cmd)
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    # Support --file / -f mode
+    if len(args) >= 2 and args[0] in ("-f", "--file"):
+        run_file("macmini", args[1])
+    else:
+        cmd = " ".join(args) if args else 'docker ps --format "table {{.Names}}\\t{{.Status}}"'
+        run("macmini", [cmd])
