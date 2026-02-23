@@ -150,6 +150,7 @@ export interface ProactiveMessage {
   triggerType: ProactiveTriggerType;
   content: string;
   delivered: boolean;
+  deliveredAt?: Date;          // V3: when the message was delivered
   createdAt: Date;
 }
 
@@ -195,6 +196,7 @@ export interface ActiveEvent {
   name: string;
   intensity: number;           // 0-1
   relevance: number;           // 0-1, event-character relevance (default 0.8)
+  confidence: number;          // 0-1, detection confidence (V3, default 1.0 for manual/regex)
   createdAt: number;           // timestamp
   decayRate: number;           // per-hour decay (default 0.5)
 }

@@ -93,6 +93,15 @@ export class Metroid {
       this.generateProactiveResponse(agentId, triggerPrompt)
     );
 
+    // Wire up lightweight LLM analysis for event detection (V3)
+    this.proactive.setAnalyzeFn(async (prompt) => {
+      const result = await this.callLLMWithFallback(
+        'You are an emotion analysis assistant. Reply with valid JSON only, no markdown.',
+        [{ role: 'user', content: prompt }],
+      );
+      return result.text;
+    });
+
     this.client = new Anthropic({
       apiKey: this.config.llm.apiKey,
       baseURL: this.config.llm.baseUrl,

@@ -62,6 +62,7 @@ export function getDb(config: MetroidConfig): Database.Database {
       trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
       content TEXT NOT NULL,
       delivered INTEGER NOT NULL DEFAULT 0,
+      delivered_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_proactive_agent_pending
@@ -79,9 +80,11 @@ export function getDb(config: MetroidConfig): Database.Database {
         trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
         content TEXT NOT NULL,
         delivered INTEGER NOT NULL DEFAULT 0,
+        delivered_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      INSERT INTO proactive_messages_new SELECT * FROM proactive_messages;
+      INSERT INTO proactive_messages_new (id, agent_id, trigger_id, trigger_type, content, delivered, created_at)
+        SELECT id, agent_id, trigger_id, trigger_type, content, delivered, created_at FROM proactive_messages;
       DROP TABLE proactive_messages;
       ALTER TABLE proactive_messages_new RENAME TO proactive_messages;
       CREATE INDEX IF NOT EXISTS idx_proactive_agent_pending
@@ -110,6 +113,38 @@ export function getDb(config: MetroidConfig): Database.Database {
       value REAL NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (agent_id, dimension)
+    );
+  `);
+
+  // Migration V3: add delivered_at column to proactive_messages
+  const pmCols = db.prepare("PRAGMA table_info(proactive_messages)").all() as any[];
+  if (!pmCols.some((c: any) => c.name === 'delivered_at')) {
+    db.exec("ALTER TABLE proactive_messages ADD COLUMN delivered_at TEXT");
+  }
+
+  // Migration V3: add proactive_reactions table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS proactive_reactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      message_id TEXT NOT NULL REFERENCES proactive_messages(id),
+      reaction TEXT NOT NULL CHECK(reaction IN ('engaged','ignored','dismissed')),
+      response_latency_ms INTEGER,
+      conversation_turns INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_reactions_agent
+      ON proactive_reactions(agent_id, created_at DESC);
+  `);
+
+  // Migration V3: add proactive_preferences table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS proactive_preferences (
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      key TEXT NOT NULL,
+      value REAL NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (agent_id, key)
     );
   `);
 

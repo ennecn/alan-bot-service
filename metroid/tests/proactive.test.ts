@@ -164,10 +164,13 @@ describe('ProactiveEngine', () => {
   // === Trigger Evaluation ===
 
   describe('idle trigger', () => {
+    const responses = ['你好呀，好久不见！', '最近过得怎么样？有什么新鲜事吗？', '在忙什么呢，要不要聊聊天？'];
+    let callCount = 0;
     beforeEach(() => {
+      callCount = 0;
       const agent = identity.createAgent('ProBot', proactiveCard, 'enhanced');
       agentId = agent.id;
-      engine.setGenerateFn(async (_id, _prompt) => '你好呀，好久不见！');
+      engine.setGenerateFn(async (_id, _prompt) => responses[callCount++ % responses.length]);
     });
 
     it('should not fire before idle threshold', async () => {
@@ -184,7 +187,7 @@ describe('ProactiveEngine', () => {
       await engine.evaluateAll(agentId);
       const msgs = engine.getPendingMessages(agentId);
       expect(msgs).toHaveLength(1);
-      expect(msgs[0].content).toBe('你好呀，好久不见！');
+      expect(msgs[0].content).toContain('你好呀，好久不见！');
       expect(msgs[0].triggerType).toBe('idle');
     });
 
@@ -2038,6 +2041,443 @@ describe('ProactiveEngine', () => {
       expect(msg).toBeDefined();
       expect(msg!.triggerType).toBe('impulse:emotion');
       vi.restoreAllMocks();
+    });
+  });
+
+  // ============================================================
+  // V3: Message Deduplication Tests
+  // ============================================================
+
+  describe('V3: Message Deduplication', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+    let agent: any;
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig as any);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+      agent = identity.createAgent('DedupBot', proactiveCard, 'enhanced');
+      engine.start(agent.id);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    it('should detect duplicate via bigram Jaccard (no embedding)', async () => {
+      // Insert a message manually
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('msg-1', agent.id, '今天天气真好，出去走走吧');
+
+      const dup = await engine.isDuplicate(agent.id, '今天天气真好，出去走走吧！');
+      expect(dup).toBe(true);
+    });
+
+    it('should allow semantically different messages', async () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('msg-2', agent.id, '今天天气真好，出去走走吧');
+
+      const dup = await engine.isDuplicate(agent.id, '你最近在看什么书？');
+      expect(dup).toBe(false);
+    });
+
+    it('should check against recently delivered messages', async () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, created_at)
+        VALUES (?, ?, 'test', 'idle', ?, 1, datetime('now'))`).run('msg-3', agent.id, '想你了，在干嘛呢');
+
+      const dup = await engine.isDuplicate(agent.id, '想你了，在干嘛呢？');
+      expect(dup).toBe(true);
+    });
+
+    it('should return false when no existing messages', async () => {
+      const dup = await engine.isDuplicate(agent.id, '你好呀');
+      expect(dup).toBe(false);
+    });
+
+    it('should not cross-contaminate between agents', async () => {
+      const agent2 = identity.createAgent('DedupBot2', proactiveCard, 'enhanced');
+      engine.start(agent2.id);
+
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('msg-4', agent.id, '今天天气真好');
+
+      const dup = await engine.isDuplicate(agent2.id, '今天天气真好');
+      expect(dup).toBe(false);
+    });
+
+    it('should skip duplicate in fireTrigger', async () => {
+      const generated = vi.fn().mockResolvedValue('今天天气真好，出去走走吧');
+      engine.setGenerateFn(generated);
+
+      // Pre-insert a similar message
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('msg-5', agent.id, '今天天气真好，出去走走吧');
+
+      // Fire event trigger
+      await engine.fireEvent(agent.id, 'birthday');
+      // The generated message should be duplicate, so no new message beyond the pre-inserted one
+      const pending = engine.getPendingMessages(agent.id);
+      expect(pending.length).toBe(1); // only the pre-inserted one
+    });
+
+    it('should skip duplicate in fireImpulse', async () => {
+      const card = makeImpulseCard();
+      const impAgent = identity.createAgent('DedupImpulse', card, 'enhanced');
+      engine.start(impAgent.id);
+
+      const generated = vi.fn().mockResolvedValue('想你了，在干嘛呢');
+      engine.setGenerateFn(generated);
+
+      // Pre-insert a similar message
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'impulse:idle', ?, 0)`).run('msg-6', impAgent.id, '想你了，在干嘛呢');
+
+      // Force impulse to fire
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, impAgent.id, 0.9);
+      engine.advanceTime(60);
+      await engine.evaluateAll(impAgent.id);
+
+      const pending = engine.getPendingMessages(impAgent.id);
+      // Should only have the pre-inserted one, not a duplicate
+      expect(pending.length).toBe(1);
+      vi.restoreAllMocks();
+    });
+
+    it('bigram Jaccard handles empty strings', async () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('msg-7', agent.id, 'a');
+
+      // Very short strings — should not crash
+      const dup = await engine.isDuplicate(agent.id, 'b');
+      expect(typeof dup).toBe('boolean');
+    });
+  });
+
+  // ============================================================
+  // V3: User Feedback Loop Tests
+  // ============================================================
+
+  describe('V3: User Feedback Loop', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+    let agent: any;
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig as any);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+      agent = identity.createAgent('FeedbackBot', impulseCard, 'enhanced');
+      engine.start(agent.id);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    it('should record engaged reaction when user replies within 30 min', async () => {
+      // Insert a delivered message with delivered_at
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+        VALUES (?, ?, 'test', 'idle', ?, 1, datetime('now', '-5 minutes'))`).run('fb-1', agent.id, 'Hello!');
+
+      // Simulate user response
+      await engine.onResponse('user reply', ctx(agent.id, 'Thanks!'));
+
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all('fb-1') as any[];
+      expect(reactions.length).toBe(1);
+      expect(reactions[0].reaction).toBe('engaged');
+      expect(reactions[0].response_latency_ms).toBeGreaterThan(0);
+    });
+
+    it('should mark stale messages as ignored after 30 min', async () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+        VALUES (?, ?, 'test', 'idle', ?, 1, datetime('now', '-45 minutes'))`).run('fb-2', agent.id, 'Hello!');
+
+      await engine.evaluateAll(agent.id);
+
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all('fb-2') as any[];
+      expect(reactions.length).toBe(1);
+      expect(reactions[0].reaction).toBe('ignored');
+    });
+
+    it('should not double-record reactions', async () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+        VALUES (?, ?, 'test', 'idle', ?, 1, datetime('now', '-5 minutes'))`).run('fb-3', agent.id, 'Hello!');
+
+      await engine.onResponse('reply 1', ctx(agent.id, 'Hi'));
+      await engine.onResponse('reply 2', ctx(agent.id, 'How are you'));
+
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all('fb-3') as any[];
+      expect(reactions.length).toBe(1); // only first reaction recorded
+    });
+
+    it('should use default threshold when no preferences exist', () => {
+      const threshold = engine.getAdaptiveThreshold(agent.id);
+      expect(threshold).toBeNull();
+    });
+
+    it('should store and retrieve preferences', () => {
+      engine.updatePreferences(agent.id); // no data yet, should be no-op
+
+      // Manually insert some reactions to trigger preference update
+      for (let i = 0; i < 10; i++) {
+        const msgId = `pref-msg-${i}`;
+        db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+          VALUES (?, ?, 'test', 'impulse:idle', ?, 1, datetime('now', '-${i} minutes'))`).run(msgId, agent.id, `msg ${i}`);
+        db.prepare(`INSERT INTO proactive_reactions (agent_id, message_id, reaction)
+          VALUES (?, ?, ?)`).run(agent.id, msgId, i < 8 ? 'engaged' : 'ignored');
+      }
+
+      engine.updatePreferences(agent.id);
+      const threshold = engine.getAdaptiveThreshold(agent.id);
+      expect(threshold).not.toBeNull();
+      expect(threshold!).toBeLessThan(testConfig.proactive.impulseFireThreshold); // high engagement → lower threshold
+    });
+
+    it('should raise threshold when engagement is low', () => {
+      for (let i = 0; i < 10; i++) {
+        const msgId = `low-msg-${i}`;
+        db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+          VALUES (?, ?, 'test', 'impulse:idle', ?, 1, datetime('now', '-${i} minutes'))`).run(msgId, agent.id, `msg ${i}`);
+        db.prepare(`INSERT INTO proactive_reactions (agent_id, message_id, reaction)
+          VALUES (?, ?, ?)`).run(agent.id, msgId, i < 2 ? 'engaged' : 'ignored');
+      }
+
+      engine.updatePreferences(agent.id);
+      const threshold = engine.getAdaptiveThreshold(agent.id);
+      expect(threshold).not.toBeNull();
+      expect(threshold!).toBeGreaterThan(testConfig.proactive.impulseFireThreshold); // low engagement → higher threshold
+    });
+
+    it('should record manual reaction', () => {
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 1)`).run('fb-manual', agent.id, 'Hello!');
+
+      engine.recordReaction(agent.id, 'fb-manual', 'dismissed', 5000, 0);
+
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all('fb-manual') as any[];
+      expect(reactions.length).toBe(1);
+      expect(reactions[0].reaction).toBe('dismissed');
+    });
+
+    it('should isolate preferences between agents', () => {
+      const agent2 = identity.createAgent('FeedbackBot2', impulseCard, 'enhanced');
+      engine.start(agent2.id);
+
+      // Set preference for agent1
+      for (let i = 0; i < 10; i++) {
+        const msgId = `iso-msg-${i}`;
+        db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at)
+          VALUES (?, ?, 'test', 'impulse:idle', ?, 1, datetime('now', '-${i} minutes'))`).run(msgId, agent.id, `msg ${i}`);
+        db.prepare(`INSERT INTO proactive_reactions (agent_id, message_id, reaction)
+          VALUES (?, ?, 'engaged')`).run(agent.id, msgId);
+      }
+      engine.updatePreferences(agent.id);
+
+      // Agent2 should have no preferences
+      expect(engine.getAdaptiveThreshold(agent2.id)).toBeNull();
+    });
+
+    it('markDelivered should set delivered_at', () => {
+      const generated = vi.fn().mockResolvedValue('Hello there!');
+      engine.setGenerateFn(generated);
+
+      // Insert a pending message
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'idle', ?, 0)`).run('del-1', agent.id, 'Hello!');
+
+      engine.markDelivered('del-1');
+
+      const row = db.prepare('SELECT delivered, delivered_at FROM proactive_messages WHERE id = ?').get('del-1') as any;
+      expect(row.delivered).toBe(1);
+      expect(row.delivered_at).not.toBeNull();
+    });
+
+    it('should apply adaptive threshold in evaluateImpulse', async () => {
+      // Set a very high adaptive threshold
+      db.prepare(`INSERT INTO proactive_preferences (agent_id, key, value) VALUES (?, 'fire_threshold', 0.99)`).run(agent.id);
+
+      const generated = vi.fn().mockResolvedValue('Hello!');
+      engine.setGenerateFn(generated);
+
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      setImpulseValue(engine, agent.id, 0.95); // below 0.99 but above default 0.6
+      // Don't advance time — idle activation stays near 0, so impulse won't gain enough to exceed 0.99
+      await engine.evaluateAll(agent.id);
+
+      // Should NOT fire because impulse (0.95) < adaptive threshold (0.99)
+      expect(generated).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+  });
+
+  // ============================================================
+  // V3: Context-Aware Event Detection Tests
+  // ============================================================
+
+  describe('V3: Context-Aware Event Detection', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+    let agent: any;
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig as any);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+      agent = identity.createAgent('EventBot', impulseCard, 'enhanced');
+      engine.start(agent.id);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    it('should confirm regex candidates via LLM', async () => {
+      const analyzeFn = vi.fn().mockResolvedValue(JSON.stringify({
+        events: [{ name: 'farewell', confirmed: true, intensity: 0.9, relevance: 0.9, confidence: 0.95, reason: 'User said goodbye' }],
+        new_events: [],
+      }));
+      engine.setAnalyzeFn(analyzeFn);
+
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '再见了，我要出国了',
+        [{ name: 'farewell', intensity: 0.8, relevance: 0.9 }],
+      );
+
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      const farewell = results.find(e => e.name === 'farewell');
+      expect(farewell).toBeDefined();
+      expect(farewell!.confidence).toBeGreaterThanOrEqual(0.5);
+    });
+
+    it('should reject false positive via LLM', async () => {
+      const analyzeFn = vi.fn().mockResolvedValue(JSON.stringify({
+        events: [{ name: 'loneliness', confirmed: false, confidence: 0.1, reason: 'Just a metaphor' }],
+        new_events: [],
+      }));
+      engine.setAnalyzeFn(analyzeFn);
+
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '我一个人吃了整个蛋糕',
+        [{ name: 'loneliness', intensity: 0.5, relevance: 0.7 }],
+      );
+
+      const loneliness = results.find(e => e.name === 'loneliness');
+      expect(loneliness).toBeUndefined();
+    });
+
+    it('should discover new events via LLM', async () => {
+      const analyzeFn = vi.fn().mockResolvedValue(JSON.stringify({
+        events: [{ name: 'farewell', confirmed: true, intensity: 0.8, relevance: 0.9, confidence: 0.9 }],
+        new_events: [{ name: 'anxiety', intensity: 0.6, relevance: 0.7, confidence: 0.8, reason: 'User worried about future' }],
+      }));
+      engine.setAnalyzeFn(analyzeFn);
+
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '再见了，我好担心以后的生活',
+        [{ name: 'farewell', intensity: 0.8, relevance: 0.9 }],
+      );
+
+      expect(results.length).toBe(2);
+      expect(results.find(e => e.name === 'anxiety')).toBeDefined();
+    });
+
+    it('should fallback to regex when LLM fails', async () => {
+      const analyzeFn = vi.fn().mockRejectedValue(new Error('LLM unavailable'));
+      engine.setAnalyzeFn(analyzeFn);
+
+      const candidates = [{ name: 'farewell', intensity: 0.8, relevance: 0.9 }];
+      const results = await engine.detectEventsWithLLM(agent.id, '再见', candidates);
+
+      expect(results.length).toBe(1);
+      expect(results[0].name).toBe('farewell');
+      expect(results[0].confidence).toBe(0.6); // fallback confidence
+    });
+
+    it('should filter low-confidence events', async () => {
+      const analyzeFn = vi.fn().mockResolvedValue(JSON.stringify({
+        events: [{ name: 'conflict', confirmed: true, intensity: 0.7, relevance: 0.8, confidence: 0.3 }],
+        new_events: [{ name: 'anxiety', intensity: 0.5, relevance: 0.5, confidence: 0.2 }],
+      }));
+      engine.setAnalyzeFn(analyzeFn);
+
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '生气',
+        [{ name: 'conflict', intensity: 0.7, relevance: 0.8 }],
+      );
+
+      // Both should be filtered (confidence < 0.5)
+      expect(results.length).toBe(0);
+    });
+
+    it('should auto-confirm events not marked for LLM verify', async () => {
+      // 'celebration' has llmVerify: false
+      const analyzeFn = vi.fn();
+      engine.setAnalyzeFn(analyzeFn);
+
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '生日快乐',
+        [{ name: 'celebration', intensity: 0.7, relevance: 0.8 }],
+      );
+
+      // Should auto-confirm without calling LLM
+      expect(analyzeFn).not.toHaveBeenCalled();
+      expect(results.length).toBe(1);
+      expect(results[0].name).toBe('celebration');
+      expect(results[0].confidence).toBe(0.8);
+    });
+
+    it('should use regex results when no analyzeFn set', async () => {
+      // Don't set analyzeFn
+      const results = await engine.detectEventsWithLLM(
+        agent.id, '再见',
+        [{ name: 'farewell', intensity: 0.8, relevance: 0.9 }],
+      );
+
+      expect(results.length).toBe(1);
+      expect(results[0].confidence).toBe(0.6); // default confidence
+    });
+
+    it('should detect new V3 event patterns', async () => {
+      // Test new patterns added in V3
+      await engine.onResponse('', ctx(agent.id, '烦死了，什么都不顺'));
+      const state = engine.getImpulseState(agent.id);
+      const frustration = state?.activeEvents.find(e => e.name === 'frustration');
+      expect(frustration).toBeDefined();
+    });
+
+    it('should detect anxiety pattern', async () => {
+      await engine.onResponse('', ctx(agent.id, '我好焦虑，明天的考试怎么办'));
+      const state = engine.getImpulseState(agent.id);
+      const anxiety = state?.activeEvents.find(e => e.name === 'anxiety');
+      expect(anxiety).toBeDefined();
+    });
+
+    it('ActiveEvent should include confidence field', () => {
+      engine.addActiveEvent(agent.id, 'test-event', 0.8, 0.5, 0.9, 0.75);
+      const state = engine.getImpulseState(agent.id);
+      const event = state?.activeEvents.find(e => e.name === 'test-event');
+      expect(event).toBeDefined();
+      expect(event!.confidence).toBe(0.75);
     });
   });
 });

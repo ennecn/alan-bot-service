@@ -3,6 +3,7 @@ import type { MetroidConfig } from '../../config.js';
 import type { IdentityEngine } from '../identity/index.js';
 import type { EmotionEngine } from '../emotion/index.js';
 import type { AuditLog } from '../../security/audit.js';
+import { EmbeddingService } from '../memory/embedding.js';
 import type {
   Engine, EngineContext, PromptFragment,
   ProactiveTrigger, ProactiveTriggerType, ProactiveMessage,
@@ -19,14 +20,21 @@ interface EmotionSnapshot {
 const EMOTION_HISTORY_MAX = 60; // keep ~60 snapshots (1 per check interval)
 
 // Conversation event detection keywords (bilingual)
-const EVENT_PATTERNS: Array<{ pattern: RegExp; event: string; intensity: number; relevance: number }> = [
-  { pattern: /再见|告别|离开|出国|分别|farewell|goodbye|leaving/i, event: 'farewell', intensity: 0.8, relevance: 0.9 },
-  { pattern: /吵架|生气|讨厌你|不理你|conflict|angry|hate/i, event: 'conflict', intensity: 0.7, relevance: 0.8 },
-  { pattern: /想你|好久不见|miss you|missed you/i, event: 'longing', intensity: 0.6, relevance: 0.9 },
-  { pattern: /孤独|寂寞|一个人|lonely|alone/i, event: 'loneliness', intensity: 0.5, relevance: 0.7 },
-  { pattern: /生日|纪念日|birthday|anniversary/i, event: 'celebration', intensity: 0.7, relevance: 0.8 },
-  { pattern: /难过|伤心|哭|sad|crying|tears/i, event: 'distress', intensity: 0.6, relevance: 0.8 },
-  { pattern: /喜欢你|爱你|love you|like you|表白|confession/i, event: 'intimacy', intensity: 0.8, relevance: 1.0 },
+const EVENT_PATTERNS: Array<{ pattern: RegExp; event: string; intensity: number; relevance: number; llmVerify: boolean }> = [
+  { pattern: /再见|告别|离开|出国|分别|farewell|goodbye|leaving/i, event: 'farewell', intensity: 0.8, relevance: 0.9, llmVerify: true },
+  { pattern: /吵架|生气|讨厌你|不理你|conflict|angry|hate/i, event: 'conflict', intensity: 0.7, relevance: 0.8, llmVerify: true },
+  { pattern: /想你|好久不见|miss you|missed you/i, event: 'longing', intensity: 0.6, relevance: 0.9, llmVerify: false },
+  { pattern: /孤独|寂寞|一个人|lonely|alone/i, event: 'loneliness', intensity: 0.5, relevance: 0.7, llmVerify: true },
+  { pattern: /生日|纪念日|birthday|anniversary/i, event: 'celebration', intensity: 0.7, relevance: 0.8, llmVerify: false },
+  { pattern: /难过|伤心|哭|sad|crying|tears/i, event: 'distress', intensity: 0.6, relevance: 0.8, llmVerify: true },
+  { pattern: /喜欢你|爱你|love you|like you|表白|confession/i, event: 'intimacy', intensity: 0.8, relevance: 1.0, llmVerify: true },
+  // V3: new patterns
+  { pattern: /烦死了|受不了|frustrat|annoyed|irritat/i, event: 'frustration', intensity: 0.6, relevance: 0.7, llmVerify: true },
+  { pattern: /太棒了|好开心|兴奋|excited|amazing|awesome/i, event: 'excitement', intensity: 0.7, relevance: 0.8, llmVerify: false },
+  { pattern: /谢谢|感谢|感恩|thank|grateful/i, event: 'gratitude', intensity: 0.5, relevance: 0.6, llmVerify: true },
+  { pattern: /对不起|抱歉|sorry|apologize/i, event: 'apology', intensity: 0.5, relevance: 0.7, llmVerify: true },
+  { pattern: /焦虑|担心|害怕|anxious|worried|scared/i, event: 'anxiety', intensity: 0.6, relevance: 0.8, llmVerify: true },
+  { pattern: /怀念|以前|那时候|nostalg|remember when/i, event: 'nostalgia', intensity: 0.5, relevance: 0.7, llmVerify: true },
 ];
 
 /**
@@ -54,6 +62,14 @@ export class ProactiveEngine implements Engine {
   private emotionHistory = new Map<string, EmotionSnapshot[]>(); // agentId → ring buffer
   private impulseStates = new Map<string, ImpulseState>(); // agentId → impulse accumulator
 
+  // === Dedup (V3) ===
+  private embedding: EmbeddingService;
+  private messageEmbeddingCache = new Map<string, Float32Array>(); // messageId → embedding
+
+  // === Feedback loop (V3) ===
+  /** Callback for lightweight LLM analysis (event detection) */
+  private analyzeFn?: (prompt: string) => Promise<string>;
+
   /** Injectable clock — returns epoch ms. Override via setDebugClock() for testing. */
   private clockFn: () => number = () => Date.now();
   private debugTimeOffset = 0; // ms offset added to real time in debug mode
@@ -70,6 +86,7 @@ export class ProactiveEngine implements Engine {
     private audit: AuditLog,
     private config: MetroidConfig,
   ) {
+    this.embedding = new EmbeddingService(config);
     this.stmts = this.prepareStatements();
   }
 
@@ -112,7 +129,7 @@ export class ProactiveEngine implements Engine {
         ORDER BY created_at ASC LIMIT ?
       `),
       markDelivered: this.db.prepare(`
-        UPDATE proactive_messages SET delivered = 1 WHERE id = ?
+        UPDATE proactive_messages SET delivered = 1, delivered_at = datetime('now') WHERE id = ?
       `),
       countPending: this.db.prepare(`
         SELECT COUNT(*) as cnt FROM proactive_messages
@@ -127,6 +144,54 @@ export class ProactiveEngine implements Engine {
         ON CONFLICT(agent_id, dimension) DO UPDATE SET
           value = excluded.value, updated_at = excluded.updated_at
       `),
+      // V3: dedup — recent delivered messages
+      getRecentDelivered: this.db.prepare(`
+        SELECT id, content FROM proactive_messages
+        WHERE agent_id = ? AND delivered = 1
+        AND created_at > datetime('now', '-30 minutes')
+        ORDER BY created_at DESC LIMIT 10
+      `),
+      // V3: feedback loop
+      insertReaction: this.db.prepare(`
+        INSERT INTO proactive_reactions (agent_id, message_id, reaction, response_latency_ms, conversation_turns)
+        VALUES (?, ?, ?, ?, ?)
+      `),
+      getUnreactedDelivered: this.db.prepare(`
+        SELECT pm.id, pm.delivered_at FROM proactive_messages pm
+        WHERE pm.agent_id = ? AND pm.delivered = 1 AND pm.delivered_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM proactive_reactions pr WHERE pr.message_id = pm.id)
+        ORDER BY pm.delivered_at DESC LIMIT 1
+      `),
+      getStaleDelivered: this.db.prepare(`
+        SELECT pm.id FROM proactive_messages pm
+        WHERE pm.agent_id = ? AND pm.delivered = 1 AND pm.delivered_at IS NOT NULL
+        AND pm.delivered_at < datetime('now', '-30 minutes')
+        AND NOT EXISTS (SELECT 1 FROM proactive_reactions pr WHERE pr.message_id = pm.id)
+      `),
+      getPreference: this.db.prepare(`
+        SELECT value FROM proactive_preferences WHERE agent_id = ? AND key = ?
+      `),
+      upsertPreference: this.db.prepare(`
+        INSERT INTO proactive_preferences (agent_id, key, value, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
+        ON CONFLICT(agent_id, key) DO UPDATE SET
+          value = excluded.value, updated_at = excluded.updated_at
+      `),
+      getReactionStats: this.db.prepare(`
+        SELECT
+          pm.trigger_type,
+          pr.reaction,
+          COUNT(*) as cnt
+        FROM proactive_reactions pr
+        JOIN proactive_messages pm ON pm.id = pr.message_id
+        WHERE pr.agent_id = ?
+        AND pr.created_at > datetime('now', '-7 days')
+        GROUP BY pm.trigger_type, pr.reaction
+      `),
+      countReactionsSince: this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM proactive_reactions
+        WHERE agent_id = ? AND created_at > datetime('now', '-7 days')
+      `),
     };
   }
 
@@ -138,6 +203,11 @@ export class ProactiveEngine implements Engine {
   /** Set callback for when a proactive message is generated (for WS push) */
   setOnMessageFn(fn: (agentId: string, msg: ProactiveMessage) => void): void {
     this.onMessageFn = fn;
+  }
+
+  /** Set lightweight LLM analysis callback (for event detection) */
+  setAnalyzeFn(fn: (prompt: string) => Promise<string>): void {
+    this.analyzeFn = fn;
   }
 
   /** Record user activity (called on each chat message) */
@@ -185,6 +255,158 @@ export class ProactiveEngine implements Engine {
       this.timers.clear();
       this.emotionHistory.clear();
       this.impulseStates.clear();
+    }
+  }
+
+  // ============================================================
+  // V3: Message Deduplication
+  // ============================================================
+
+  /** Check if content is semantically duplicate of pending + recent delivered messages */
+  async isDuplicate(agentId: string, content: string): Promise<boolean> {
+    // Gather comparison targets: pending + recent delivered
+    const pending = this.stmts.getPending.all(agentId, 20) as Array<{ id: string; content: string }>;
+    const delivered = this.stmts.getRecentDelivered.all(agentId) as Array<{ id: string; content: string }>;
+    const targets = [...pending, ...delivered];
+    if (targets.length === 0) return false;
+
+    // Try embedding-based comparison first
+    const contentEmb = await this.embedding.embed(content);
+    if (contentEmb) {
+      for (const t of targets) {
+        let targetEmb = this.messageEmbeddingCache.get(t.id);
+        if (!targetEmb) {
+          const emb = await this.embedding.embed(t.content);
+          if (emb) {
+            targetEmb = emb;
+            this.messageEmbeddingCache.set(t.id, emb);
+          }
+        }
+        if (targetEmb) {
+          const sim = EmbeddingService.cosineSimilarity(contentEmb, targetEmb);
+          if (sim > 0.85) {
+            console.log(`[Dedup] Skipping duplicate (cosine=${sim.toFixed(3)}) for ${agentId}`);
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    // Fallback: bigram Jaccard similarity
+    for (const t of targets) {
+      const sim = bigramJaccard(content, t.content);
+      if (sim > 0.7) {
+        console.log(`[Dedup] Skipping duplicate (jaccard=${sim.toFixed(3)}) for ${agentId}`);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Clean stale entries from embedding cache (messages older than 1 hour) */
+  private cleanEmbeddingCache(): void {
+    // Simple strategy: if cache exceeds 100 entries, clear oldest half
+    if (this.messageEmbeddingCache.size > 100) {
+      const keys = [...this.messageEmbeddingCache.keys()];
+      for (let i = 0; i < keys.length / 2; i++) {
+        this.messageEmbeddingCache.delete(keys[i]);
+      }
+    }
+  }
+
+  // ============================================================
+  // V3: User Feedback Loop
+  // ============================================================
+
+  /** Record user reaction to a proactive message */
+  recordReaction(agentId: string, messageId: string, reaction: 'engaged' | 'ignored' | 'dismissed', latencyMs?: number, turns?: number): void {
+    this.stmts.insertReaction.run(agentId, messageId, reaction, latencyMs ?? null, turns ?? null);
+  }
+
+  /** Detect reaction from user response — called in onResponse() */
+  private detectReaction(agentId: string): void {
+    const row = this.stmts.getUnreactedDelivered.get(agentId) as { id: string; delivered_at: string } | undefined;
+    if (!row || !row.delivered_at) return;
+
+    const deliveredAt = new Date(row.delivered_at + 'Z').getTime();
+    const now = this.now();
+    const latencyMs = now - deliveredAt;
+
+    // If within 30 minutes, user engaged
+    if (latencyMs <= 30 * 60_000) {
+      this.recordReaction(agentId, row.id, 'engaged', latencyMs);
+      this.maybeUpdatePreferences(agentId);
+    }
+  }
+
+  /** Mark stale delivered messages as ignored (called in evaluateAll) */
+  private markStaleAsIgnored(agentId: string): void {
+    const rows = this.stmts.getStaleDelivered.all(agentId) as Array<{ id: string }>;
+    for (const r of rows) {
+      this.recordReaction(agentId, r.id, 'ignored');
+    }
+    if (rows.length > 0) this.maybeUpdatePreferences(agentId);
+  }
+
+  /** Get adaptive fire threshold for an agent */
+  getAdaptiveThreshold(agentId: string): number | null {
+    const row = this.stmts.getPreference.get(agentId, 'fire_threshold') as { value: number } | undefined;
+    return row?.value ?? null;
+  }
+
+  /** Get a preference value */
+  getPreference(agentId: string, key: string): number | null {
+    const row = this.stmts.getPreference.get(agentId, key) as { value: number } | undefined;
+    return row?.value ?? null;
+  }
+
+  /** Maybe update preferences if enough reactions accumulated */
+  private maybeUpdatePreferences(agentId: string): void {
+    const countRow = this.stmts.countReactionsSince.get(agentId) as { cnt: number };
+    if (countRow.cnt < 10) return; // need at least 10 reactions
+    // Only recalculate every 10 reactions
+    if (countRow.cnt % 10 !== 0) return;
+    this.updatePreferences(agentId);
+  }
+
+  /** Recalculate signal weights and fire threshold based on reaction history */
+  updatePreferences(agentId: string): void {
+    const stats = this.stmts.getReactionStats.all(agentId) as Array<{ trigger_type: string; reaction: string; cnt: number }>;
+    if (stats.length === 0) return;
+
+    // Group by trigger_type
+    const byType = new Map<string, { engaged: number; total: number }>();
+    for (const s of stats) {
+      const entry = byType.get(s.trigger_type) ?? { engaged: 0, total: 0 };
+      entry.total += s.cnt;
+      if (s.reaction === 'engaged') entry.engaged += s.cnt;
+      byType.set(s.trigger_type, entry);
+    }
+
+    // Compute overall engaged rate for threshold adjustment
+    let totalEngaged = 0, totalAll = 0;
+    for (const [, v] of byType) {
+      totalEngaged += v.engaged;
+      totalAll += v.total;
+    }
+    const overallRate = totalAll > 0 ? totalEngaged / totalAll : 0.5;
+
+    // Adjust fire threshold: low engagement → raise threshold, high → lower
+    const agent = this.identity.getAgent(agentId);
+    const baseThreshold = agent?.card.proactive?.impulse?.fireThreshold ?? this.config.proactive.impulseFireThreshold;
+    let newThreshold = baseThreshold;
+    if (overallRate < 0.3) newThreshold = Math.min(0.95, baseThreshold * 1.15);
+    else if (overallRate > 0.7) newThreshold = Math.max(0.3, baseThreshold * 0.9);
+    this.stmts.upsertPreference.run(agentId, 'fire_threshold', newThreshold);
+
+    // Adjust per-type weights
+    for (const [triggerType, data] of byType) {
+      const rate = data.total > 0 ? data.engaged / data.total : 0.5;
+      let multiplier = 1;
+      if (rate < 0.3) multiplier = 0.8;
+      else if (rate > 0.7) multiplier = 1.1;
+      this.stmts.upsertPreference.run(agentId, `weight:${triggerType}`, multiplier);
     }
   }
 
@@ -388,6 +610,8 @@ export class ProactiveEngine implements Engine {
   /** Evaluate both legacy triggers and impulse system (public for debug tick) */
   async evaluateAll(agentId: string): Promise<void> {
     this.recordEmotionSnapshot(agentId); // ensure manual ticks also record snapshots
+    this.markStaleAsIgnored(agentId); // V3: mark stale messages as ignored
+    this.cleanEmbeddingCache(); // V3: clean dedup cache
     await this.evaluateTriggers(agentId);
     const agent = this.identity.getAgent(agentId);
     if (agent?.card.proactive?.impulse?.enabled) {
@@ -409,7 +633,7 @@ export class ProactiveEngine implements Engine {
   }
 
   /** Inject an event into the impulse system (from API or conversation detection) */
-  addActiveEvent(agentId: string, name: string, intensity: number, decayRate = 0.5, relevance = 0.8): void {
+  addActiveEvent(agentId: string, name: string, intensity: number, decayRate = 0.5, relevance = 0.8, confidence = 1.0): void {
     const state = this.impulseStates.get(agentId);
     if (!state) return;
     const now = this.now();
@@ -421,9 +645,10 @@ export class ProactiveEngine implements Engine {
       const effectiveIntensity = minutesSince < 10 ? intensity * 0.5 : intensity;
       existing.intensity = Math.max(existing.intensity, effectiveIntensity);
       existing.relevance = Math.max(existing.relevance, relevance);
+      existing.confidence = Math.max(existing.confidence, confidence);
       existing.createdAt = now;
     } else {
-      state.activeEvents.push({ name, intensity, relevance, createdAt: now, decayRate });
+      state.activeEvents.push({ name, intensity, relevance, confidence, createdAt: now, decayRate });
     }
     console.log(`[Impulse] Event '${name}' (intensity=${intensity}, relevance=${relevance}) added for ${agentId}`);
   }
@@ -505,9 +730,9 @@ export class ProactiveEngine implements Engine {
       if (e.intensity < 0.05) state.activeEvents.splice(i, 1);
     }
 
-    // 2. Compute event gate (max intensity × relevance of active events)
+    // 2. Compute event gate (max intensity × relevance × confidence of active events)
     const eventGate = state.activeEvents.length > 0
-      ? Math.max(...state.activeEvents.map(e => e.intensity * e.relevance))
+      ? Math.max(...state.activeEvents.map(e => e.intensity * e.relevance * (e.confidence ?? 1)))
       : 0;
 
     // 3. Compute gain from all signals
@@ -527,7 +752,8 @@ export class ProactiveEngine implements Engine {
     state.value = Math.max(0, Math.min(1, state.value + totalGain * dtHours - totalDecay));
 
     // 6. Check firing
-    const fireThreshold = impulseConfig.fireThreshold ?? this.config.proactive.impulseFireThreshold;
+    const baseFireThreshold = impulseConfig.fireThreshold ?? this.config.proactive.impulseFireThreshold;
+    const fireThreshold = this.getAdaptiveThreshold(agentId) ?? baseFireThreshold;
     const cooldownMs = (impulseConfig.cooldownMinutes ?? this.config.proactive.impulseCooldownMinutes) * 60_000;
     const cooldownElapsed = (now - state.lastFireTime) > cooldownMs;
     const pendingCount = (this.stmts.countPending.get(agentId) as any)?.cnt ?? 0;
@@ -651,6 +877,92 @@ export class ProactiveEngine implements Engine {
     return events;
   }
 
+  // ============================================================
+  // V3: Context-Aware Event Detection (LLM)
+  // ============================================================
+
+  /** Use LLM to confirm/deny regex candidates and discover new events */
+  async detectEventsWithLLM(
+    agentId: string,
+    text: string,
+    regexCandidates: Array<{ name: string; intensity: number; relevance: number }>,
+    recentHistory: import('../../types.js').MetroidMessage[] = [],
+  ): Promise<Array<{ name: string; intensity: number; relevance: number; confidence: number }>> {
+    if (!this.analyzeFn) return regexCandidates.map(e => ({ ...e, confidence: 0.6 }));
+
+    // Only verify events marked for LLM verification
+    const needsVerify = regexCandidates.filter(c => {
+      const pat = EVENT_PATTERNS.find(p => p.event === c.name);
+      return pat?.llmVerify !== false;
+    });
+    const autoConfirm = regexCandidates.filter(c => {
+      const pat = EVENT_PATTERNS.find(p => p.event === c.name);
+      return pat?.llmVerify === false;
+    }).map(e => ({ ...e, confidence: 0.8 }));
+
+    if (needsVerify.length === 0) return autoConfirm;
+
+    const contextLines = recentHistory.slice(-3).map(m =>
+      `${m.author.name}: ${m.content.slice(0, 100)}`
+    ).join('\n');
+
+    const candidateList = needsVerify.map(c => c.name).join(', ');
+
+    const prompt = `分析以下对话消息，判断是否包含以下情感事件。
+
+消息: "${text.slice(0, 500)}"
+${contextLines ? `上下文:\n${contextLines}\n` : ''}
+候选事件: ${candidateList}
+
+请以JSON格式回复（不要markdown代码块）:
+{"events":[{"name":"事件名","confirmed":true/false,"intensity":0.0-1.0,"relevance":0.0-1.0,"confidence":0.0-1.0,"reason":"简短原因"}],"new_events":[{"name":"新事件名","intensity":0.0-1.0,"relevance":0.0-1.0,"confidence":0.0-1.0,"reason":"简短原因"}]}`;
+
+    try {
+      const raw = await this.analyzeFn(prompt);
+      const cleaned = raw.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(cleaned) as {
+        events?: Array<{ name: string; confirmed: boolean; intensity: number; relevance: number; confidence: number }>;
+        new_events?: Array<{ name: string; intensity: number; relevance: number; confidence: number }>;
+      };
+
+      const results: Array<{ name: string; intensity: number; relevance: number; confidence: number }> = [...autoConfirm];
+
+      // Process confirmed events
+      if (parsed.events) {
+        for (const e of parsed.events) {
+          if (e.confirmed && e.confidence >= 0.5) {
+            results.push({
+              name: e.name,
+              intensity: e.intensity ?? 0.5,
+              relevance: e.relevance ?? 0.7,
+              confidence: e.confidence,
+            });
+          }
+        }
+      }
+
+      // Process newly discovered events
+      if (parsed.new_events) {
+        for (const e of parsed.new_events) {
+          if (e.confidence >= 0.5) {
+            results.push({
+              name: e.name,
+              intensity: e.intensity ?? 0.5,
+              relevance: e.relevance ?? 0.7,
+              confidence: e.confidence,
+            });
+          }
+        }
+      }
+
+      console.log(`[EventDetect] LLM confirmed ${results.length} events for ${agentId}`);
+      return results;
+    } catch (err) {
+      console.warn(`[EventDetect] LLM analysis failed, using regex fallback:`, err);
+      return regexCandidates.map(e => ({ ...e, confidence: 0.6 }));
+    }
+  }
+
   /** Determine dominant trigger type from signal contributions */
   private determineTriggerType(agentId: string, impulseConfig: NonNullable<NonNullable<import('../../types.js').MetroidCard['proactive']>['impulse']>): string {
     const contributions: Record<string, number> = {};
@@ -732,6 +1044,9 @@ export class ProactiveEngine implements Engine {
       const content = await this.generateFn(agentId, prompt);
       if (!content || content.length < 2) return;
 
+      // V3: dedup check
+      if (await this.isDuplicate(agentId, content)) return;
+
       const id = `impulse-${agentId}-${this.now()}`;
       this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, content);
       this.notifyMessage(agentId, id, 'impulse', triggerType, content);
@@ -761,6 +1076,9 @@ export class ProactiveEngine implements Engine {
     try {
       const content = await this.generateFn(agentId, trigger.prompt);
       if (!content || content.length < 2) return;
+
+      // V3: dedup check
+      if (await this.isDuplicate(agentId, content)) return;
 
       const id = `proactive-${agentId}-${this.now()}`;
       this.stmts.insertMessage.run(id, agentId, `trigger-${index}`, trigger.type, content);
@@ -805,6 +1123,7 @@ export class ProactiveEngine implements Engine {
       triggerType: r.trigger_type as ProactiveTriggerType,
       content: r.content,
       delivered: !!r.delivered,
+      deliveredAt: r.delivered_at ? new Date(r.delivered_at) : undefined,
       createdAt: new Date(r.created_at),
     }));
   }
@@ -835,10 +1154,33 @@ export class ProactiveEngine implements Engine {
   async onResponse(_response: string, context: EngineContext): Promise<void> {
     // Record activity on each conversation turn
     this.recordActivity(context.agentId);
+
+    // V3: detect user reaction to proactive messages
+    this.detectReaction(context.agentId);
+
     // Detect conversation events and inject into impulse system
-    const events = this.detectConversationEvents(context.message.content);
-    for (const e of events) {
-      this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
+    const regexEvents = this.detectConversationEvents(context.message.content);
+
+    // V3: if regex found candidates, try LLM confirmation
+    if (regexEvents.length > 0 && this.analyzeFn) {
+      // Fire LLM verification asynchronously — don't block the response
+      this.detectEventsWithLLM(context.agentId, context.message.content, regexEvents, context.conversationHistory)
+        .then(confirmedEvents => {
+          for (const e of confirmedEvents) {
+            this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
+          }
+        })
+        .catch(() => {
+          // LLM failed — fall back to regex results
+          for (const e of regexEvents) {
+            this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
+          }
+        });
+    } else {
+      // No LLM available or no regex hits — use regex results directly
+      for (const e of regexEvents) {
+        this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
+      }
     }
   }
 
@@ -850,4 +1192,18 @@ export class ProactiveEngine implements Engine {
 /** Sigmoid function for probabilistic firing */
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
+}
+
+/** Bigram Jaccard similarity — fallback when embedding is unavailable */
+function bigramJaccard(a: string, b: string): number {
+  const bigrams = (s: string) => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const setA = bigrams(a), setB = bigrams(b);
+  if (setA.size === 0 && setB.size === 0) return 1;
+  let intersection = 0;
+  for (const bg of setA) if (setB.has(bg)) intersection++;
+  return intersection / (setA.size + setB.size - intersection);
 }

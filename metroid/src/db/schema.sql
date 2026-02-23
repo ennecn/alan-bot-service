@@ -126,11 +126,34 @@ CREATE TABLE IF NOT EXISTS proactive_messages (
   trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron','idle','emotion','event','impulse:idle','impulse:emotion','impulse:mixed')),
   content TEXT NOT NULL,
   delivered INTEGER NOT NULL DEFAULT 0,
+  delivered_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_proactive_agent_pending
   ON proactive_messages(agent_id, delivered, created_at DESC);
+
+-- === Proactive Reactions (V3: user feedback loop) ===
+CREATE TABLE IF NOT EXISTS proactive_reactions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  message_id TEXT NOT NULL REFERENCES proactive_messages(id),
+  reaction TEXT NOT NULL CHECK(reaction IN ('engaged','ignored','dismissed')),
+  response_latency_ms INTEGER,
+  conversation_turns INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_agent
+  ON proactive_reactions(agent_id, created_at DESC);
+
+-- === Proactive Preferences (V3: per-agent learned weights) ===
+CREATE TABLE IF NOT EXISTS proactive_preferences (
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  key TEXT NOT NULL,
+  value REAL NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (agent_id, key)
+);
 
 -- === Impulse States (proactive impulse accumulator) ===
 CREATE TABLE IF NOT EXISTS impulse_states (

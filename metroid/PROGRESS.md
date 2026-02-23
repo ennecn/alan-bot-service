@@ -1,6 +1,6 @@
-# Metroid 开发进度 (2026-02-22)
+# Metroid 开发进度 (2026-02-23)
 
-## 版本: v0.3.1
+## 版本: v0.4.0
 
 ## 代码同步记录
 
@@ -87,16 +87,38 @@
   - triggerType 细化 — 基于 dominant signal 动态决定 (impulse:idle/emotion/mixed)
 - 测试: 84 → 114 (30 个新 V2 测试, 全部通过)
 
+### Proactive Engine V3 — 去重 + 反馈回路 + 事件检测 (2026-02-23)
+- 三大 critical gaps 修复: 消息去重、用户反馈回路、上下文感知事件检测
+- **Feature 1: 消息去重**
+  - `isDuplicate()` — embedding cosine similarity (>0.85) + bigram Jaccard fallback (>0.7)
+  - 复用 EmbeddingService, 内存 embedding cache (Map<messageId, Float32Array>)
+  - fireImpulse/fireTrigger 插入前自动检查, 跳过重复消息
+  - 对比范围: pending messages + 最近 30 分钟已投递消息
+- **Feature 2: 用户反馈回路**
+  - DB: 新增 `proactive_reactions` 表 (engaged/ignored/dismissed) + `proactive_preferences` 表
+  - `proactive_messages` 新增 `delivered_at` 列, markDelivered 同时写入时间戳
+  - 自动反应检测: onResponse 中检查未标记的已投递消息 → engaged; evaluateAll 中超时 → ignored
+  - 自适应 threshold: 从 proactive_preferences 读取, 低 engagement → 提高阈值, 高 → 降低
+  - 权重调整: 每 10 次反应重新计算 per-triggerType engaged 率, 调整信号权重
+- **Feature 3: 上下文感知事件检测**
+  - Hybrid 模式: regex 快筛 → LLM 确认 (仅 llmVerify=true 的事件)
+  - `detectEventsWithLLM()` — 构建 prompt 含消息+上下文+候选, LLM 返回 JSON 确认/否定/新发现
+  - `setAnalyzeFn()` — 轻量 LLM 回调, 由 Metroid 主类注入
+  - 新增 6 个事件模式: frustration, excitement, gratitude, apology, anxiety, nostalgia
+  - ActiveEvent.confidence 字段, eventGate 改为 max(intensity × relevance × confidence)
+  - LLM 不可用时 graceful degradation 到 regex 结果
+- 测试: 114 → 142 (28 个新 V3 测试, 全部通过)
+
 ### 基础设施
 - 13 test files, Vitest 框架
 - SQLite (better-sqlite3) 存储
 - TypeScript 全量类型
 - 代码量: ~3785 行核心代码 (src/)
 
-### 测试现状 (2026-02-22)
+### 测试现状 (2026-02-23)
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| Passed | 114 | 核心引擎测试 (含 30 个 Proactive V2 新测试) |
+| Passed | 142 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 新测试) |
 | Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
 | Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
@@ -141,7 +163,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| Proactive Engine 测试 | ✅ 114 tests (V1 84 + V2 30), 全覆盖 |
+| Proactive Engine 测试 | ✅ 142 tests (V1 84 + V2 30 + V3 28), 全覆盖 |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
 | Social Engine 测试 | 关系更新无测试 |
