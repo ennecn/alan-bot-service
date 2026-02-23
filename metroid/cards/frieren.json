@@ -27,7 +27,8 @@
       "arousal": -0.3,
       "dominance": 0.2
     },
-    "intensityDial": 0.3
+    "intensityDial": 0.3,
+    "expressiveness": 0.4
   },
   "memoryStyle": {
     "encodingRate": 0.4,

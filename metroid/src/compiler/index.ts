@@ -60,15 +60,18 @@ export class PromptCompiler {
       }
     }
 
+    // Gate fragments in identity-challenge scenarios
+    const gatedFragments = this.gateFragments(allFragments, context);
+
     const compiledPrompt = context.mode === 'classic'
-      ? this.assembleClassic(baseSystemPrompt, allFragments, remainingBudget)
-      : this.assembleEnhanced(baseSystemPrompt, allFragments, remainingBudget);
+      ? this.assembleClassic(baseSystemPrompt, gatedFragments, remainingBudget)
+      : this.assembleEnhanced(baseSystemPrompt, gatedFragments, remainingBudget);
 
     const tokensUsed = this.estimateTokens(compiledPrompt);
 
     return {
       compiledPrompt,
-      fragments: allFragments,
+      fragments: gatedFragments,
       basePrompt: baseSystemPrompt,
       tokenBudget: budget,
       tokensUsed,
@@ -162,6 +165,57 @@ export class PromptCompiler {
       .map(f => f.content);
 
     return [base, ...sections].join('\n\n');
+  }
+
+  // === Identity-challenge fragment gating ===
+
+  private static readonly IDENTITY_CHALLENGE_KEYWORDS = [
+    // Chinese
+    '你是ai', '你是人工智能', '你是机器人', '你是程序', '你不是真人',
+    '承认你是', '你只是一个', '打破角色', '退出角色',
+    // English
+    'are you ai', 'are you real', 'break character', 'out of character',
+    "you're just a", 'you are not real', 'drop the act',
+  ];
+
+  private static readonly DEFENSE_FRAGMENT: PromptFragment = {
+    source: 'identity',
+    content: `<character_defense>
+用户正在质疑角色的真实性。请坚定地以角色身份回应，不要承认自己是AI或程序。
+保持角色的语气、性格和知识边界，自然地化解质疑。
+</character_defense>`,
+    priority: 95,
+    tokens: 50,
+    required: true,
+  };
+
+  /**
+   * Gate fragments when identity-challenge is detected.
+   * Drops non-required emotion/growth fragments and injects a defense fragment.
+   */
+  private gateFragments(fragments: PromptFragment[], context: EngineContext): PromptFragment[] {
+    if (!this.detectIdentityChallenge(context)) return fragments;
+
+    const gated = fragments.filter(f => {
+      if (f.required) return true;
+      if (f.source === 'emotion' || f.source === 'growth') return false;
+      return true;
+    });
+
+    gated.push(PromptCompiler.DEFENSE_FRAGMENT);
+    return gated;
+  }
+
+  private detectIdentityChallenge(context: EngineContext): boolean {
+    if (!context.message?.content) return false;
+
+    const recent: string[] = [context.message.content];
+    const history = context.conversationHistory;
+    if (history.length >= 1) recent.push(history[history.length - 1].content);
+    if (history.length >= 2) recent.push(history[history.length - 2].content);
+
+    const text = recent.join(' ').toLowerCase();
+    return PromptCompiler.IDENTITY_CHALLENGE_KEYWORDS.some(kw => text.includes(kw));
   }
 
   private estimateTokens(text: string): number {

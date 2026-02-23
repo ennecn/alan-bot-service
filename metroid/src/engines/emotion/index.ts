@@ -81,7 +81,7 @@ export class EmotionEngine implements Engine {
       agent.emotionState = recovered;
     }
 
-    const intensityDial = agent.card.emotion?.intensityDial ?? 0.8;
+    const intensityDial = (agent.card.emotion?.intensityDial ?? 0.8) * (agent.card.emotion?.expressiveness ?? 1.0);
     const hints = this.translateToStyleHints(recovered, intensityDial);
     if (!hints) return [];
 
