@@ -66,6 +66,9 @@ export class ProactiveEngine implements Engine {
   private embedding: EmbeddingService;
   private messageEmbeddingCache = new Map<string, Float32Array>(); // messageId → embedding
 
+  // === V4: Spark embedding cache ===
+  private sparkEmbeddingCache = new Map<string, Float32Array>(); // spark keyword → embedding
+
   // === Feedback loop (V3) ===
   /** Callback for lightweight LLM analysis (event detection) */
   private analyzeFn?: (prompt: string) => Promise<string>;
@@ -336,6 +339,14 @@ export class ProactiveEngine implements Engine {
     // If within 30 minutes, user engaged
     if (latencyMs <= 30 * 60_000) {
       this.recordReaction(agentId, row.id, 'engaged', latencyMs);
+      // V4: Self-action feedback — positive response
+      const state = this.impulseStates.get(agentId);
+      if (state?.awaitingResponse && state.awaitingMessageId === row.id) {
+        const responseIntensity = Math.max(0.2, 0.6 * (1 - latencyMs / (30 * 60_000)));
+        this.addActiveEvent(agentId, 'response_positive', responseIntensity, 0.4, 0.7);
+        state.awaitingResponse = false;
+        state.awaitingMessageId = undefined;
+      }
       this.maybeUpdatePreferences(agentId);
     }
   }
@@ -345,6 +356,13 @@ export class ProactiveEngine implements Engine {
     const rows = this.stmts.getStaleDelivered.all(agentId) as Array<{ id: string }>;
     for (const r of rows) {
       this.recordReaction(agentId, r.id, 'ignored');
+      // V4: Self-action feedback — message was ignored
+      const state = this.impulseStates.get(agentId);
+      if (state?.awaitingResponse && state.awaitingMessageId === r.id) {
+        this.addActiveEvent(agentId, 'message_ignored', 0.4, 0.3, 0.6);
+        state.awaitingResponse = false;
+        state.awaitingMessageId = undefined;
+      }
     }
     if (rows.length > 0) this.maybeUpdatePreferences(agentId);
   }
@@ -628,6 +646,9 @@ export class ProactiveEngine implements Engine {
         lastFireTime: 0,
         activeEvents: [],
         suppressionCount: 0,
+        memoryPressure: 0,
+        lastMemoryPressureTime: this.now(),
+        awaitingResponse: false,
       });
     }
   }
@@ -636,6 +657,10 @@ export class ProactiveEngine implements Engine {
   addActiveEvent(agentId: string, name: string, intensity: number, decayRate = 0.5, relevance = 0.8, confidence = 1.0): void {
     const state = this.impulseStates.get(agentId);
     if (!state) return;
+    // V4: Cognitive Filter — apply per-agent event sensitivity
+    const agent = this.identity.getAgent(agentId);
+    const sensitivity = agent?.card.emotion?.eventSensitivity?.[name] ?? 1.0;
+    intensity = Math.min(1, intensity * sensitivity);
     const now = this.now();
     // Don't duplicate — refresh intensity if same event exists
     const existing = state.activeEvents.find(e => e.name === name);
@@ -722,6 +747,22 @@ export class ProactiveEngine implements Engine {
     const restraint = emotionCfg?.restraint ?? 0.3;
     const expressiveness = emotionCfg?.expressiveness ?? 0.5;
 
+    // V4: Update memory pressure (leaky integrator)
+    const pressureDt = (now - state.lastMemoryPressureTime) / 3_600_000;
+    state.lastMemoryPressureTime = now;
+    const currentEmotion = this.emotion.getState(agentId);
+    const baseline = emotionCfg?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    if (currentEmotion) {
+      const emotionDist = Math.sqrt(
+        (currentEmotion.pleasure - baseline.pleasure) ** 2 +
+        (currentEmotion.arousal - baseline.arousal) ** 2 +
+        (currentEmotion.dominance - baseline.dominance) ** 2
+      );
+      const pressureDecay = impulseConfig.memoryPressureDecayRate ?? 0.02;
+      state.memoryPressure += emotionDist * pressureDt - pressureDecay * pressureDt;
+      state.memoryPressure = Math.max(0, Math.min(2, state.memoryPressure));
+    }
+
     // 1. Decay active events
     for (let i = state.activeEvents.length - 1; i >= 0; i--) {
       const e = state.activeEvents[i];
@@ -775,6 +816,9 @@ export class ProactiveEngine implements Engine {
         console.log(`[Impulse] Suppressed for ${agent.name} (impulse=${state.value.toFixed(3)}, threshold=${dynamicThreshold.toFixed(3)}, p=${fireProbability.toFixed(3)}, suppressions=${state.suppressionCount})`);
       }
     }
+
+    // V4: Inspiration spark evaluation
+    await this.evaluateSpark(agentId, agent, state);
   }
 
   /** Compute activation for a single signal */
@@ -788,6 +832,8 @@ export class ProactiveEngine implements Engine {
         return this.computeTimeActivation(signal.timeRange);
       case 'emotion_pressure':
         return this.computeEmotionPressureActivation(agentId);
+      case 'memory_breach':
+        return this.computeMemoryBreachActivation(agentId);
       default:
         return 0;
     }
@@ -805,6 +851,86 @@ export class ProactiveEngine implements Engine {
       (state.dominance - baseline.dominance) ** 2
     );
     return Math.min(1, dist / 1.0); // saturates early: dist=1 → full activation (intentionally sensitive)
+  }
+
+  /** V4: Memory breach activation — smooth ramp when pressure exceeds threshold */
+  private computeMemoryBreachActivation(agentId: string): number {
+    const state = this.impulseStates.get(agentId);
+    if (!state) return 0;
+    const agent = this.identity.getAgent(agentId);
+    const threshold = agent?.card.proactive?.impulse?.memoryBreachThreshold ?? 0.7;
+    if (state.memoryPressure < threshold) return 0;
+    return Math.min(1, (state.memoryPressure - threshold) / threshold);
+  }
+
+  /** V4: Inspiration spark — random thematic seed × prepared mind = eureka */
+  private async evaluateSpark(agentId: string, agent: AgentIdentity, state: ImpulseState): Promise<void> {
+    const impulseConfig = agent.card.proactive?.impulse;
+    const pool = impulseConfig?.sparkPool;
+    if (!pool || pool.length === 0) return;
+
+    // Compute dynamic probability with bonuses
+    const baseProbability = impulseConfig?.sparkProbability ?? 0.08;
+    const lastActive = this.lastActivity.get(agentId) ?? this.now();
+    const idleHours = (this.now() - lastActive) / 3_600_000;
+    const idleBonus = Math.min(0.1, idleHours * 0.05);
+    const currentEmotion = this.emotion.getState(agentId);
+    const baseline = agent.card.emotion?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    let emotionBonus = 0;
+    if (currentEmotion) {
+      const dist = Math.sqrt(
+        (currentEmotion.pleasure - baseline.pleasure) ** 2 +
+        (currentEmotion.arousal - baseline.arousal) ** 2 +
+        (currentEmotion.dominance - baseline.dominance) ** 2
+      );
+      emotionBonus = Math.min(0.08, dist * 0.08);
+    }
+    const pressureBonus = Math.min(0.05, state.memoryPressure * 0.05);
+    const probability = Math.min(0.3, baseProbability + idleBonus + emotionBonus + pressureBonus);
+
+    if (Math.random() >= probability) return;
+
+    // Pick random spark
+    const spark = pool[Math.floor(Math.random() * pool.length)];
+
+    // Compute resonance
+    let resonance = 0;
+    const resonanceThreshold = impulseConfig?.sparkResonanceThreshold ?? 0.4;
+
+    // Semantic similarity with active events
+    if (state.activeEvents.length > 0) {
+      let sparkEmb = this.sparkEmbeddingCache.get(spark);
+      if (!sparkEmb) {
+        const emb = await this.embedding.embed(spark);
+        if (emb) { sparkEmb = emb; this.sparkEmbeddingCache.set(spark, emb); }
+      }
+      if (sparkEmb) {
+        let maxSim = 0;
+        for (const e of state.activeEvents) {
+          const eventEmb = await this.embedding.embed(e.name);
+          if (eventEmb) {
+            const sim = EmbeddingService.cosineSimilarity(sparkEmb, eventEmb) * e.intensity;
+            maxSim = Math.max(maxSim, sim);
+          }
+        }
+        resonance += maxSim;
+      }
+    }
+
+    // Late-night bonus
+    const hour = this.nowDate().getHours();
+    if (hour >= 22 || hour < 5) resonance += 0.2;
+
+    // Memory pressure alignment
+    if (state.memoryPressure > 0.3) resonance += state.memoryPressure * 0.2;
+
+    resonance = Math.min(1, resonance);
+
+    if (resonance >= resonanceThreshold) {
+      const intensity = 0.4 + 0.4 * resonance; // 0.4-0.8 based on resonance
+      this.addActiveEvent(agentId, `inspiration:${spark}`, intensity, 0.3, 0.9);
+      console.log(`[Spark] '${spark}' resonated (${resonance.toFixed(2)}) for ${agent.name}`);
+    }
   }
 
   /** Check if all conditions in an emotion pattern are satisfied */
@@ -968,7 +1094,7 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     const contributions: Record<string, number> = {};
     for (const signal of impulseConfig.signals) {
       const activation = this.computeSignalActivation(agentId, signal);
-      const key = signal.type === 'emotion_pattern' || signal.type === 'emotion_pressure' ? 'emotion' : signal.type;
+      const key = signal.type === 'emotion_pattern' || signal.type === 'emotion_pressure' || signal.type === 'memory_breach' ? 'emotion' : signal.type;
       contributions[key] = (contributions[key] ?? 0) + signal.weight * activation;
     }
     const sorted = Object.entries(contributions).sort((a, b) => b[1] - a[1]);
@@ -1011,13 +1137,18 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       for (const e of state.activeEvents) {
         const agoMin = Math.round((this.now() - e.createdAt) / 60_000);
         const relLabel = e.relevance >= 0.8 ? '高度相关' : e.relevance >= 0.5 ? '相关' : '间接相关';
-        xml += `    ${e.name} (强度${e.intensity.toFixed(1)}, ${relLabel}, ${agoMin}分钟前)\n`;
+        // V4: label inspiration events
+        const label = e.name.startsWith('inspiration:') ? `灵感: ${e.name.slice(12)}` : e.name;
+        xml += `    ${label} (强度${e.intensity.toFixed(1)}, ${relLabel}, ${agoMin}分钟前)\n`;
       }
       xml += '  </active_events>\n';
     }
 
     xml += '  <trigger_context>\n';
     xml += `    冲动强度: ${(state.value * 100).toFixed(0)}%\n`;
+    if (state.memoryPressure > 0.1) {
+      xml += `    情绪积压: ${(state.memoryPressure * 100).toFixed(0)}%\n`;
+    }
     if (state.suppressionCount > 0) {
       xml += `    已抑制: ${state.suppressionCount}次\n`;
     }
@@ -1050,6 +1181,11 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       const id = `impulse-${agentId}-${this.now()}`;
       this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, content);
       this.notifyMessage(agentId, id, 'impulse', triggerType, content);
+
+      // V4: Self-action feedback — track awaiting response
+      this.addActiveEvent(agentId, 'awaiting_response', 0.3, 0.3, 0.5);
+      state.awaitingResponse = true;
+      state.awaitingMessageId = id;
 
       await this.audit.log({
         timestamp: this.nowDate(),

@@ -102,6 +102,7 @@ export interface MetroidCard {
     restraint?: number;       // 0-1, self-control (0=impulsive, 1=restrained)
     moodInertia?: number;              // 0-1, long-term mood inertia (default 0.9)
     longTermDimensions?: string[];     // tracked long-term dimensions (default ['attachment','trust'])
+    eventSensitivity?: Record<string, number>; // event name → intensity multiplier (default 1.0)
   };
   memoryStyle?: {
     encodingRate: number;
@@ -163,10 +164,15 @@ export interface ImpulseConfig {
   fireThreshold?: number;      // base threshold to fire (default 0.6)
   cooldownMinutes?: number;    // min time between firings (default 30)
   promptTemplate: string;      // LLM prompt when impulse fires
+  memoryBreachThreshold?: number;    // pressure level to trigger breach (default 0.7)
+  memoryPressureDecayRate?: number;  // per-hour passive decay (default 0.02)
+  sparkPool?: string[];              // thematic keywords (e.g., ['月亮','远方','咖啡'])
+  sparkProbability?: number;         // per-tick base probability (default 0.08)
+  sparkResonanceThreshold?: number;  // min resonance to inject event (default 0.4)
 }
 
 export interface ImpulseSignal {
-  type: 'emotion_pattern' | 'idle' | 'time_of_day' | 'emotion_pressure';
+  type: 'emotion_pattern' | 'idle' | 'time_of_day' | 'emotion_pressure' | 'memory_breach';
   weight: number;              // 0-1, contribution weight
   emotionCondition?: EmotionPattern;
   idleMinutes?: number;
@@ -190,6 +196,10 @@ export interface ImpulseState {
   lastFireTime: number;        // timestamp
   activeEvents: ActiveEvent[];
   suppressionCount: number;    // consecutive suppressions
+  memoryPressure: number;      // V4: accumulated emotional pressure (0-2)
+  lastMemoryPressureTime: number; // V4: timestamp for pressure computation
+  awaitingResponse: boolean;   // V4: waiting for user reply to proactive msg
+  awaitingMessageId?: string;  // V4: the proactive message ID we're waiting on
 }
 
 export interface ActiveEvent {

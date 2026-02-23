@@ -123,10 +123,37 @@
 - TypeScript 全量类型
 - 代码量: ~3785 行核心代码 (src/)
 
+### Proactive Engine V4 — 行为动力学增强 (2026-02-23)
+- 四大 feature 让 agent 心理模型更真实, 全部 opt-in (agent card 配置), 现有卡片零影响
+- **Feature 1: 认知过滤器 (eventSensitivity)**
+  - `MetroidCard.emotion.eventSensitivity` — 事件名→强度乘数 (默认 1.0)
+  - 敏感 agent 放大冲突, 开朗 agent 放大庆祝, 3 行改动
+- **Feature 2: 情绪蓄水池 (Memory Pool + Breach)**
+  - `ImpulseState.memoryPressure` — 漏积分器, 情绪偏离基线时积压, 回归时衰减
+  - `memory_breach` 信号类型 — 积压超阈值时贡献 impulse gain (蓄水池决堤)
+  - `ImpulseConfig.memoryBreachThreshold` (默认 0.7) / `memoryPressureDecayRate` (默认 0.02)
+  - `formatInternalState()` 新增 `情绪积压: X%` 显示
+- **Feature 3: 自我行为反馈回路 (Self-Action Feedback)**
+  - `ImpulseState.awaitingResponse/awaitingMessageId` — 追踪主动消息等待状态
+  - `fireImpulse()` 后注入 `awaiting_response` 事件
+  - 用户快速回复 → `response_positive` 事件 (强度随延迟衰减)
+  - 消息被忽略 → `message_ignored` 事件
+- **Feature 4: 灵感系统 (Spark + Resonance)**
+  - `ImpulseConfig.sparkPool` — 主题关键词池 (如 ['月亮','远方','咖啡'])
+  - 每 tick 按概率抽取 spark, 计算与当前状态的共鸣度 (embedding cosine + 深夜加成 + 积压加成)
+  - 共鸣超阈值 → 注入 `inspiration:{keyword}` 高强度事件
+  - spark embedding 缓存 (静态关键词只算一次)
+- 类型扩展: `ImpulseSignal.type` 新增 `memory_breach`, `ImpulseConfig` 新增 5 个配置项, `ImpulseState` 新增 4 个字段
+- 测试: 149 → 170 (21 个新 V4 测试, 全部通过)
+  - F1: 5 tests (放大/截断/衰减/默认值/无配置)
+  - F2: 7 tests (初始化/积累/衰减/截断/breach 激活/breach 未达阈值/prompt 显示)
+  - F3: 4 tests (fire 后 awaiting/正面反馈/忽略反馈/初始化)
+  - F4: 5 tests (无 pool 不触发/概率触发/共鸣门控/灵感标签/向后兼容)
+
 ### 测试现状 (2026-02-23)
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| Passed | 149 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 + 7 个 E2E 生命周期测试) |
+| Passed | 170 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 + 7 个 E2E + 21 个 V4 行为动力学测试) |
 | Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
 | Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
@@ -171,7 +198,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| Proactive Engine 测试 | ✅ 149 tests (V1 84 + V2 30 + V3 28 + E2E 7), 全覆盖 |
+| Proactive Engine 测试 | ✅ 170 tests (V1 84 + V2 30 + V3 28 + E2E 7 + V4 21), 全覆盖 |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
 | Social Engine 测试 | 关系更新无测试 |

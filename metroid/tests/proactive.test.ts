@@ -2866,4 +2866,413 @@ describe('ProactiveEngine', () => {
       vi.restoreAllMocks();
     });
   });
+
+  // ============================================================
+  // V4: Behavioral Dynamics Tests
+  // ============================================================
+
+  describe('V4: Behavioral Dynamics', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig as any);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    // --- Feature 1: Cognitive Filter (eventSensitivity) ---
+
+    describe('F1: Cognitive Filter', () => {
+      it('should multiply event intensity by sensitivity', () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          emotion: {
+            ...impulseCard.emotion!,
+            eventSensitivity: { conflict: 1.5, celebration: 0.5 },
+          },
+        };
+        const agent = identity.createAgent('CF1', card, 'enhanced');
+        engine.start(agent.id);
+
+        engine.addActiveEvent(agent.id, 'conflict', 0.6);
+        const state = engine.getImpulseState(agent.id)!;
+        // 0.6 * 1.5 = 0.9
+        expect(state.activeEvents.find(e => e.name === 'conflict')!.intensity).toBeCloseTo(0.9, 1);
+      });
+
+      it('should clamp amplified intensity to 1.0', () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          emotion: {
+            ...impulseCard.emotion!,
+            eventSensitivity: { conflict: 2.0 },
+          },
+        };
+        const agent = identity.createAgent('CF2', card, 'enhanced');
+        engine.start(agent.id);
+
+        engine.addActiveEvent(agent.id, 'conflict', 0.8);
+        const state = engine.getImpulseState(agent.id)!;
+        // 0.8 * 2.0 = 1.6 → clamped to 1.0
+        expect(state.activeEvents[0].intensity).toBe(1.0);
+      });
+
+      it('should dampen intensity when sensitivity < 1', () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          emotion: {
+            ...impulseCard.emotion!,
+            eventSensitivity: { celebration: 0.3 },
+          },
+        };
+        const agent = identity.createAgent('CF3', card, 'enhanced');
+        engine.start(agent.id);
+
+        engine.addActiveEvent(agent.id, 'celebration', 0.8);
+        const state = engine.getImpulseState(agent.id)!;
+        // 0.8 * 0.3 = 0.24
+        expect(state.activeEvents[0].intensity).toBeCloseTo(0.24, 2);
+      });
+
+      it('should default to 1.0 for unconfigured events', () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          emotion: {
+            ...impulseCard.emotion!,
+            eventSensitivity: { conflict: 2.0 },
+          },
+        };
+        const agent = identity.createAgent('CF4', card, 'enhanced');
+        engine.start(agent.id);
+
+        engine.addActiveEvent(agent.id, 'loneliness', 0.5);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.activeEvents[0].intensity).toBe(0.5);
+      });
+
+      it('should default to 1.0 when no eventSensitivity configured', () => {
+        const agent = identity.createAgent('CF5', impulseCard, 'enhanced');
+        engine.start(agent.id);
+
+        engine.addActiveEvent(agent.id, 'conflict', 0.7);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.activeEvents[0].intensity).toBe(0.7);
+      });
+    });
+
+    // --- Feature 2: Memory Pool Integral + Breach ---
+
+    describe('F2: Memory Pool', () => {
+      it('should initialize memoryPressure to 0', () => {
+        const agent = identity.createAgent('MP1', impulseCard, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.memoryPressure).toBe(0);
+      });
+
+      it('should accumulate pressure when emotion deviates from baseline', async () => {
+        const agent = identity.createAgent('MP2', impulseCard, 'enhanced');
+        identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: 0 };
+        engine.start(agent.id);
+        engine.advanceTime(60); // 1 hour
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.memoryPressure).toBeGreaterThan(0);
+      });
+
+      it('should decay pressure when emotion is at baseline', async () => {
+        const agent = identity.createAgent('MP3', impulseCard, 'enhanced');
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: 0, dominance: 0 };
+        engine.start(agent.id);
+        // Manually set pressure
+        engine.getImpulseState(agent.id)!.memoryPressure = 0.5;
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        // At baseline, emotionDist=0, so pressure only decays
+        expect(state.memoryPressure).toBeLessThan(0.5);
+      });
+
+      it('should clamp pressure to [0, 2]', async () => {
+        const agent = identity.createAgent('MP4', impulseCard, 'enhanced');
+        identity.getAgent(agent.id)!.emotionState = { pleasure: -1, arousal: 1, dominance: -1 };
+        engine.start(agent.id);
+        engine.getImpulseState(agent.id)!.memoryPressure = 1.9;
+        engine.advanceTime(120);
+        await engine.evaluateAll(agent.id);
+        expect(engine.getImpulseState(agent.id)!.memoryPressure).toBeLessThanOrEqual(2);
+      });
+
+      it('should activate memory_breach signal above threshold', async () => {
+        const card: MetroidCard = {
+          ...proactiveCard,
+          name: 'BreachBot',
+          emotion: { baseline: { pleasure: 0, arousal: 0, dominance: 0 }, intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2 },
+          proactive: {
+            enabled: true, triggers: [],
+            impulse: {
+              enabled: true,
+              signals: [{ type: 'memory_breach', weight: 1.0 }],
+              decayRate: 0.01, fireThreshold: 0.6, cooldownMinutes: 10,
+              promptTemplate: 'breach test',
+              memoryBreachThreshold: 0.5,
+            },
+          },
+        };
+        const agent = identity.createAgent('MP5', card, 'enhanced');
+        engine.start(agent.id);
+        // Set pressure above threshold
+        engine.getImpulseState(agent.id)!.memoryPressure = 0.8;
+        setImpulseValue(engine, agent.id, 0);
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        // breach activation = (0.8 - 0.5) / 0.5 = 0.6
+        expect(engine.getImpulseState(agent.id)!.value).toBeGreaterThan(0);
+      });
+
+      it('should not activate memory_breach below threshold', async () => {
+        const card: MetroidCard = {
+          ...proactiveCard,
+          name: 'BreachBot2',
+          emotion: { baseline: { pleasure: 0, arousal: 0, dominance: 0 }, intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2 },
+          proactive: {
+            enabled: true, triggers: [],
+            impulse: {
+              enabled: true,
+              signals: [{ type: 'memory_breach', weight: 1.0 }],
+              decayRate: 0.01, fireThreshold: 0.6, cooldownMinutes: 10,
+              promptTemplate: 'breach test',
+              memoryBreachThreshold: 0.7,
+            },
+          },
+        };
+        const agent = identity.createAgent('MP6', card, 'enhanced');
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0, arousal: 0, dominance: 0 };
+        engine.start(agent.id);
+        engine.getImpulseState(agent.id)!.memoryPressure = 0.3;
+        setImpulseValue(engine, agent.id, 0);
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        expect(engine.getImpulseState(agent.id)!.value).toBe(0);
+      });
+
+      it('should show 情绪积压 in formatInternalState when pressure > 0.1', async () => {
+        let capturedPrompt = '';
+        const card = makeImpulseCard();
+        const agent = identity.createAgent('MP7', card, 'enhanced');
+        engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'pressure prompt'; });
+        engine.start(agent.id);
+        engine.getImpulseState(agent.id)!.memoryPressure = 0.5;
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        expect(capturedPrompt).toContain('情绪积压: 50%');
+        vi.restoreAllMocks();
+      });
+    });
+
+    // --- Feature 3: Self-Action Feedback Loop ---
+
+    describe('F3: Self-Action Feedback', () => {
+      it('should set awaitingResponse after impulse fire', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        const card = makeImpulseCard();
+        const agent = identity.createAgent('SAF1', card, 'enhanced');
+        engine.setGenerateFn(async () => 'awaiting test');
+        engine.start(agent.id);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.awaitingResponse).toBe(true);
+        expect(state.awaitingMessageId).toBeDefined();
+        // Should also have awaiting_response event
+        expect(state.activeEvents.find(e => e.name === 'awaiting_response')).toBeDefined();
+        vi.restoreAllMocks();
+      });
+
+      it('should inject response_positive on engaged reply', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        const card = makeImpulseCard({ cooldownMinutes: 0 });
+        const agent = identity.createAgent('SAF2', card, 'enhanced');
+        engine.setGenerateFn(async () => 'feedback test msg');
+        engine.start(agent.id);
+
+        // Fire impulse
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        const msgId = state.awaitingMessageId!;
+        expect(msgId).toBeDefined();
+
+        // Deliver and set delivered_at
+        engine.markDelivered(msgId);
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-5 minutes') WHERE id = ?`).run(msgId);
+
+        // User replies → detectReaction fires
+        await engine.onResponse('thanks', ctx(agent.id, 'thanks'));
+
+        // Check for response_positive event
+        const positiveEvent = state.activeEvents.find(e => e.name === 'response_positive');
+        expect(positiveEvent).toBeDefined();
+        expect(state.awaitingResponse).toBe(false);
+        vi.restoreAllMocks();
+      });
+
+      it('should inject message_ignored when stale', async () => {
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        const card = makeImpulseCard({ cooldownMinutes: 0 });
+        const agent = identity.createAgent('SAF3', card, 'enhanced');
+        engine.setGenerateFn(async () => 'stale test msg');
+        engine.start(agent.id);
+
+        // Fire impulse
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        const msgId = state.awaitingMessageId!;
+
+        // Deliver and set delivered_at to 45 min ago (stale)
+        engine.markDelivered(msgId);
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-45 minutes') WHERE id = ?`).run(msgId);
+
+        // evaluateAll triggers markStaleAsIgnored
+        engine.getImpulseState(agent.id)!.lastFireTime = 0;
+        setImpulseValue(engine, agent.id, 0.1);
+        await engine.evaluateAll(agent.id);
+
+        const ignoredEvent = state.activeEvents.find(e => e.name === 'message_ignored');
+        expect(ignoredEvent).toBeDefined();
+        expect(state.awaitingResponse).toBe(false);
+        vi.restoreAllMocks();
+      });
+
+      it('should initialize awaitingResponse as false', () => {
+        const agent = identity.createAgent('SAF4', impulseCard, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        expect(state.awaitingResponse).toBe(false);
+        expect(state.awaitingMessageId).toBeUndefined();
+      });
+    });
+
+    // --- Feature 4: Inspiration System ---
+
+    describe('F4: Inspiration System', () => {
+      it('should not fire spark when no sparkPool configured', async () => {
+        const agent = identity.createAgent('IS1', impulseCard, 'enhanced');
+        engine.start(agent.id);
+        vi.spyOn(Math, 'random').mockReturnValue(0); // would always pass
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        const inspirations = state.activeEvents.filter(e => e.name.startsWith('inspiration:'));
+        expect(inspirations).toHaveLength(0);
+        vi.restoreAllMocks();
+      });
+
+      it('should fire spark at expected probability', async () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          proactive: {
+            ...impulseCard.proactive!,
+            impulse: {
+              ...impulseCard.proactive!.impulse!,
+              sparkPool: ['月亮', '远方', '咖啡'],
+              sparkProbability: 1.0, // always fire
+              sparkResonanceThreshold: 0, // always resonate
+            },
+          },
+        };
+        const agent = identity.createAgent('IS2', card, 'enhanced');
+        engine.start(agent.id);
+        // Add an active event for resonance
+        engine.addActiveEvent(agent.id, 'loneliness', 0.8);
+        vi.spyOn(Math, 'random').mockReturnValue(0); // pass probability + pick first spark
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        const inspirations = state.activeEvents.filter(e => e.name.startsWith('inspiration:'));
+        expect(inspirations.length).toBeGreaterThanOrEqual(1);
+        vi.restoreAllMocks();
+      });
+
+      it('should gate spark by resonance threshold', async () => {
+        const card: MetroidCard = {
+          ...impulseCard,
+          proactive: {
+            ...impulseCard.proactive!,
+            impulse: {
+              ...impulseCard.proactive!.impulse!,
+              sparkPool: ['月亮'],
+              sparkProbability: 1.0,
+              sparkResonanceThreshold: 0.99, // very high threshold
+            },
+          },
+        };
+        const agent = identity.createAgent('IS3', card, 'enhanced');
+        engine.start(agent.id);
+        // No active events, no late-night, no pressure → resonance ≈ 0
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        engine.advanceTime(60);
+        await engine.evaluateAll(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        const inspirations = state.activeEvents.filter(e => e.name.startsWith('inspiration:'));
+        expect(inspirations).toHaveLength(0);
+        vi.restoreAllMocks();
+      });
+
+      it('should label inspiration events as 灵感 in prompt', async () => {
+        let capturedPrompt = '';
+        const card: MetroidCard = {
+          ...makeImpulseCard(),
+          proactive: {
+            enabled: true, triggers: [],
+            impulse: {
+              enabled: true,
+              signals: [{ type: 'idle', weight: 0.5, idleMinutes: 30 }],
+              decayRate: 0.1, fireThreshold: 0.6, cooldownMinutes: 10,
+              promptTemplate: 'spark prompt test',
+              sparkPool: ['月亮'],
+              sparkProbability: 1.0,
+              sparkResonanceThreshold: 0,
+            },
+          },
+        };
+        const agent = identity.createAgent('IS4', card, 'enhanced');
+        engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'spark msg'; });
+        engine.start(agent.id);
+        // Manually inject an inspiration event to test formatting
+        engine.addActiveEvent(agent.id, 'inspiration:月亮', 0.6, 0.3, 0.9);
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        expect(capturedPrompt).toContain('灵感: 月亮');
+        vi.restoreAllMocks();
+      });
+
+      it('should be backward compatible when no sparkPool', async () => {
+        // Standard impulseCard has no sparkPool — should work identically to before
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        const agent = identity.createAgent('IS5', impulseCard, 'enhanced');
+        engine.setGenerateFn(async () => 'compat test');
+        engine.start(agent.id);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        expect(msgs.find(m => m.triggerId === 'impulse')).toBeDefined();
+        vi.restoreAllMocks();
+      });
+    });
+  });
 });
