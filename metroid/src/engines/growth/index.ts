@@ -381,10 +381,22 @@ ${snippet}
   private violatesImmutableValues(values: string[], adaptation: string): boolean {
     const lower = adaptation.toLowerCase();
     for (const value of values) {
-      // Simple check: if adaptation contains negation of an immutable value
-      if (lower.includes('不要') && lower.includes(value.toLowerCase())) return true;
-      if (lower.includes('stop') && lower.includes(value.toLowerCase())) return true;
+      const v = value.toLowerCase();
+      // Direct negation of immutable value
+      if (lower.includes('不要') && lower.includes(v)) return true;
+      if (lower.includes('stop') && lower.includes(v)) return true;
+      if (lower.includes('不再') && lower.includes(v)) return true;
+      if (lower.includes('避免') && lower.includes(v)) return true;
     }
+
+    // Block generic style overrides that conflict with any personality
+    const styleOverrides = [
+      '多用语气词', '多用表情', '多用emoji', '更活泼', '更可爱',
+      '更冷淡', '更高冷', '更温柔', '更强势', '更卑微',
+      'use more emoji', 'be more cute', 'be more cold',
+    ];
+    if (styleOverrides.some(s => lower.includes(s))) return true;
+
     return false;
   }
 

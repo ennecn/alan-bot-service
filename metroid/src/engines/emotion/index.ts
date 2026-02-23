@@ -204,30 +204,24 @@ export class EmotionEngine implements Engine {
   }
 
   translateToStyleHints(state: EmotionState, intensityDial: number): string {
-    const hints: string[] = [];
-    const threshold = 0.15; // minimum deviation to generate a hint
+    if (intensityDial < 0.1) return '';
 
-    // Pleasure + Arousal combinations
-    if (state.pleasure > threshold && state.arousal > threshold) {
-      hints.push('回复时可以更活泼一些，多用语气词和表情。');
-    } else if (state.pleasure > threshold && state.arousal <= threshold) {
-      hints.push('回复时保持温和友好的语气。');
-    } else if (state.pleasure < -threshold && state.arousal > threshold) {
-      hints.push('回复时可以更直接一些，不需要过多修饰。');
-    } else if (state.pleasure < -threshold && state.arousal <= -threshold) {
-      hints.push('回复时简短一些，语气平淡。');
-    }
+    const threshold = 0.15;
+    const p = state.pleasure, a = state.arousal, d = state.dominance;
 
-    // Dominance
-    if (state.dominance > threshold) {
-      hints.push('可以更自信地表达观点。');
-    } else if (state.dominance < -threshold) {
-      hints.push('语气可以更柔和、谦逊一些。');
-    }
+    // Skip if all dimensions are below threshold (neutral state)
+    if (Math.abs(p) < threshold && Math.abs(a) < threshold && Math.abs(d) < threshold) return '';
 
-    // Scale by intensity dial
-    if (hints.length === 0 || intensityDial < 0.1) return '';
-    return hints.join('\n');
+    // Describe emotional state, not prescribe behavior
+    const desc: string[] = [];
+    if (Math.abs(p) >= threshold) desc.push(`愉悦度: ${p > 0 ? '正面' : '负面'} (${p.toFixed(2)})`);
+    if (Math.abs(a) >= threshold) desc.push(`激活度: ${a > 0 ? '高' : '低'} (${a.toFixed(2)})`);
+    if (Math.abs(d) >= threshold) desc.push(`支配感: ${d > 0 ? '强' : '弱'} (${d.toFixed(2)})`);
+
+    return [
+      `角色当前内心情绪: ${desc.join(', ')}`,
+      '请根据角色人设自然地表达这种情绪状态，不要偏离角色性格。',
+    ].join('\n');
   }
 
   // === LLM semantic analysis ===
