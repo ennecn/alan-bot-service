@@ -2480,4 +2480,390 @@ describe('ProactiveEngine', () => {
       expect(event!.confidence).toBe(0.75);
     });
   });
+
+  // ============================================================
+  // V3: End-to-End Lifecycle Tests
+  // ============================================================
+
+  describe('V3: End-to-End Lifecycle', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig as any);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    // --- Test 1: Full lifecycle — event → generate → deliver → feedback → threshold adjust ---
+
+    it('full lifecycle: event → fire → deliver → engaged → threshold adjust', async () => {
+      let callCount = 0;
+      const card = makeImpulseCard({ cooldownMinutes: 0 }); // default fireThreshold=0.6
+      const agent = identity.createAgent('E2E-1', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0); // mock AFTER createAgent
+      // Use very distinct messages to avoid dedup (bigram Jaccard < 0.7)
+      const phrases = [
+        '今天的天气真不错，适合出去散步',
+        '你最近有没有看什么好看的电影推荐',
+        '我刚学会了一道新菜，想分享给你',
+        '周末有什么计划吗？一起去爬山怎么样',
+        '最近工作压力好大，需要放松一下',
+        '你有没有听过这首歌？旋律特别好听',
+        '我家的猫今天做了一件超搞笑的事',
+        '昨天读了一本很棒的书，强烈推荐',
+        '好想去旅行啊，你最想去哪个国家',
+        '今天心情特别好，想和你聊聊天',
+      ];
+      engine.setGenerateFn(async () => phrases[callCount++ % phrases.length]);
+      engine.start(agent.id);
+
+      // Repeat 10 cycles: event → fire → deliver → user reply → engaged
+      for (let i = 0; i < 10; i++) {
+        // Trigger loneliness event
+        await engine.onResponse('ok', ctx(agent.id, '好孤独啊'));
+        expect(engine.getImpulseState(agent.id)!.activeEvents.find(e => e.name === 'loneliness')).toBeDefined();
+
+        // Fire impulse (small advanceTime to ensure dtHours > 0)
+        engine.advanceTime(1);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+
+        const msgs = engine.getPendingMessages(agent.id);
+        const latest = msgs[msgs.length - 1];
+        expect(latest).toBeDefined();
+
+        // Deliver + manually set delivered_at to 5 min ago
+        engine.markDelivered(latest.id);
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-5 minutes') WHERE id = ?`).run(latest.id);
+
+        // User replies → engaged
+        await engine.onResponse('好的谢谢', ctx(agent.id, '好的谢谢'));
+        const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all(latest.id) as any[];
+        expect(reactions.length).toBe(1);
+        expect(reactions[0].reaction).toBe('engaged');
+
+        // Reset cooldown for next cycle
+        engine.getImpulseState(agent.id)!.lastFireTime = 0;
+      }
+
+      // After 10 engaged reactions, updatePreferences should adjust threshold
+      engine.updatePreferences(agent.id);
+      const threshold = engine.getAdaptiveThreshold(agent.id);
+      expect(threshold).not.toBeNull();
+      // High engagement (>70%) → threshold = max(0.3, 0.6 * 0.9) = 0.54 < 0.6
+      expect(threshold!).toBeLessThan(0.6);
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 2: Dedup blocks duplicate but feedback loop still works ---
+
+    it('dedup blocks duplicate message but feedback loop unaffected', async () => {
+      const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
+      const agent = identity.createAgent('E2E-2', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      // Always return same content
+      engine.setGenerateFn(async () => '想你了');
+      engine.start(agent.id);
+
+      // First fire → message inserted
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msgs1 = engine.getPendingMessages(agent.id);
+      const impulseMsg = msgs1.find(m => m.triggerId === 'impulse');
+      expect(impulseMsg).toBeDefined();
+
+      // Reset cooldown
+      engine.getImpulseState(agent.id)!.lastFireTime = 0;
+
+      // Second fire → duplicate, should be skipped
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msgs2 = engine.getPendingMessages(agent.id).filter(m => m.triggerId === 'impulse');
+      expect(msgs2).toHaveLength(1); // still only 1
+
+      // Deliver the first one and set delivered_at to 5 min ago
+      engine.markDelivered(impulseMsg!.id);
+      db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-5 minutes') WHERE id = ?`).run(impulseMsg!.id);
+      await engine.onResponse('好开心', ctx(agent.id, '好开心'));
+
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE message_id = ?').all(impulseMsg!.id) as any[];
+      expect(reactions.length).toBe(1);
+      expect(reactions[0].reaction).toBe('engaged');
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 3: LLM event detection → impulse accumulation → adaptive threshold ---
+
+    it('LLM event detection → impulse → adaptive threshold', async () => {
+      let callCount = 0;
+      const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
+      const agent = identity.createAgent('E2E-3', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      engine.setGenerateFn(async () => `llm event msg ${++callCount}`);
+
+      // Mock LLM: confirm farewell + discover anxiety
+      const analyzeFn = vi.fn().mockResolvedValue(JSON.stringify({
+        events: [{ name: 'farewell', confirmed: true, intensity: 0.9, relevance: 0.9, confidence: 0.95, reason: 'User said goodbye' }],
+        new_events: [{ name: 'anxiety', intensity: 0.6, relevance: 0.7, confidence: 0.8, reason: 'User worried' }],
+      }));
+      engine.setAnalyzeFn(analyzeFn);
+      engine.start(agent.id);
+
+      // Trigger farewell via regex → LLM confirms + discovers anxiety
+      await engine.onResponse('', ctx(agent.id, '再见了，我好担心'));
+      // LLM detection is async (.then()) — flush microtasks
+      await new Promise(r => setTimeout(r, 50));
+      const state = engine.getImpulseState(agent.id)!;
+      const farewell = state.activeEvents.find(e => e.name === 'farewell');
+      expect(farewell).toBeDefined();
+
+      // Fire with accumulated impulse
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+
+      const msgs = engine.getPendingMessages(agent.id);
+      expect(msgs.length).toBeGreaterThanOrEqual(1);
+
+      // Set a high adaptive threshold and verify fire behavior changes
+      db.prepare(`INSERT OR REPLACE INTO proactive_preferences (agent_id, key, value) VALUES (?, 'fire_threshold', 0.95)`).run(agent.id);
+      engine.getImpulseState(agent.id)!.lastFireTime = 0;
+      setImpulseValue(engine, agent.id, 0.9); // below 0.95
+      await engine.evaluateAll(agent.id);
+      // Should NOT fire a new message because 0.9 < adaptive threshold 0.95
+      const msgsAfter = engine.getPendingMessages(agent.id).filter(m => m.triggerId === 'impulse');
+      expect(msgsAfter.length).toBe(1); // still only the first one
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 4: Ignored messages raise threshold ---
+
+    it('ignored messages raise subsequent fire threshold', async () => {
+      const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
+      const agent = identity.createAgent('E2E-4', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      // Use very distinct messages to avoid dedup
+      const topics = ['天气', '电影', '音乐', '旅行', '美食', '运动', '读书', '游戏', '工作', '学习'];
+      let callCount = 0;
+      engine.setGenerateFn(async () => `今天聊聊${topics[callCount++ % topics.length]}的话题，你觉得怎么样？`);
+      engine.start(agent.id);
+
+      // Generate and deliver 10 messages with no user reply
+      const msgIds: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        engine.advanceTime(1);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        const latest = msgs[msgs.length - 1];
+        expect(latest).toBeDefined();
+        engine.markDelivered(latest.id);
+        msgIds.push(latest.id);
+        engine.getImpulseState(agent.id)!.lastFireTime = 0;
+      }
+
+      // Manually set delivered_at to 45 min ago (SQLite datetime doesn't respect advanceTime)
+      for (const id of msgIds) {
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-45 minutes') WHERE id = ?`).run(id);
+      }
+
+      // evaluateAll triggers markStaleAsIgnored
+      await engine.evaluateAll(agent.id);
+
+      const ignoredCount = (db.prepare(
+        'SELECT COUNT(*) as cnt FROM proactive_reactions WHERE agent_id = ? AND reaction = ?'
+      ).get(agent.id, 'ignored') as any).cnt;
+      expect(ignoredCount).toBeGreaterThanOrEqual(1);
+
+      // Update preferences → threshold should rise above base (0.3)
+      engine.updatePreferences(agent.id);
+      const threshold = engine.getAdaptiveThreshold(agent.id);
+      expect(threshold).not.toBeNull();
+      // Low engagement → threshold = baseThreshold * 1.15 = 0.3 * 1.15 = 0.345
+      expect(threshold!).toBeGreaterThan(0.3);
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 5: Cross-agent isolation — feedback doesn't leak ---
+
+    it('cross-agent isolation: feedback from one agent does not affect another', async () => {
+      let callCount = 0;
+      const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
+      const agent1 = identity.createAgent('IsoAlpha', card, 'enhanced');
+      // Small delay to ensure different Date.now() for unique agent IDs
+      await new Promise(r => setTimeout(r, 5));
+      const agent2 = identity.createAgent('IsoBeta', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0); // mock AFTER createAgent
+      const topics1 = ['猫咪', '狗狗', '兔子', '仓鼠', '鹦鹉', '金鱼', '乌龟', '蜥蜴', '蛇', '蜘蛛'];
+      const topics2 = ['苹果', '香蕉', '橙子', '葡萄', '草莓', '西瓜', '芒果', '桃子', '梨子', '樱桃'];
+      engine.setGenerateFn(async () => {
+        const idx = callCount++;
+        return idx < 10
+          ? `你喜欢${topics1[idx]}吗？它们真的很可爱呢`
+          : `今天吃了${topics2[idx - 10]}，味道不错哦`;
+      });
+      engine.start(agent1.id);
+      engine.start(agent2.id);
+
+      // Agent1: fire → deliver → user replies → engaged (10 times)
+      for (let i = 0; i < 10; i++) {
+        engine.advanceTime(1);
+        setImpulseValue(engine, agent1.id, 0.9);
+        await engine.evaluateAll(agent1.id);
+        const msgs = engine.getPendingMessages(agent1.id);
+        const latest = msgs[msgs.length - 1];
+        expect(latest).toBeDefined();
+        engine.markDelivered(latest.id);
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-5 minutes') WHERE id = ?`).run(latest.id);
+        await engine.onResponse('nice', ctx(agent1.id, '好的'));
+        engine.getImpulseState(agent1.id)!.lastFireTime = 0;
+      }
+
+      // Agent2: fire → deliver → no reply → manually mark as ignored
+      for (let i = 0; i < 10; i++) {
+        engine.advanceTime(1);
+        setImpulseValue(engine, agent2.id, 0.9);
+        await engine.evaluateAll(agent2.id);
+        const msgs = engine.getPendingMessages(agent2.id);
+        const latest = msgs[msgs.length - 1];
+        expect(latest).toBeDefined();
+        engine.markDelivered(latest.id);
+        db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-45 minutes') WHERE id = ?`).run(latest.id);
+        engine.getImpulseState(agent2.id)!.lastFireTime = 0;
+      }
+      // Mark agent2's stale
+      await engine.evaluateAll(agent2.id);
+
+      engine.updatePreferences(agent1.id);
+      engine.updatePreferences(agent2.id);
+
+      const t1 = engine.getAdaptiveThreshold(agent1.id);
+      const t2 = engine.getAdaptiveThreshold(agent2.id);
+
+      // Agent1 (high engagement) → lower or equal threshold
+      // Agent2 (low engagement) → higher threshold
+      if (t1 !== null && t2 !== null) {
+        expect(t2).toBeGreaterThan(t1);
+      }
+      // At minimum, agent2 should have raised threshold above base (0.3)
+      expect(t2).not.toBeNull();
+      expect(t2!).toBeGreaterThan(0.3);
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 6: Dedup + event detection combined — event injected but message deduped ---
+
+    it('event detected and injected but generated message deduped', async () => {
+      const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
+      const agent = identity.createAgent('E2E-6', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+
+      // Pre-insert a pending message with specific content
+      db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered)
+        VALUES (?, ?, 'test', 'impulse:idle', ?, 0)`).run('e2e6-pre', agent.id, '我理解你的感受');
+
+      // generateFn returns same content as pre-inserted
+      engine.setGenerateFn(async () => '我理解你的感受');
+      engine.start(agent.id);
+
+      // Trigger event via onResponse
+      await engine.onResponse('', ctx(agent.id, '好孤独啊'));
+      const state = engine.getImpulseState(agent.id)!;
+      expect(state.activeEvents.find(e => e.name === 'loneliness')).toBeDefined();
+
+      // Fire impulse → dedup should block the message
+      setImpulseValue(engine, agent.id, 0.9);
+      engine.advanceTime(30);
+      await engine.evaluateAll(agent.id);
+
+      // Event was injected into impulseState
+      expect(state.activeEvents.length).toBeGreaterThanOrEqual(1);
+
+      // But message was deduped — still only the pre-inserted one
+      const pending = engine.getPendingMessages(agent.id);
+      expect(pending.filter(m => m.content === '我理解你的感受')).toHaveLength(1);
+
+      vi.restoreAllMocks();
+    });
+
+    // --- Test 7: Full session lifecycle — start → chat → fire → deliver → stop → verify persistence ---
+
+    it('full session lifecycle: start → chat → fire → stop → verify persistence', async () => {
+      let callCount = 0;
+      const card: MetroidCard = {
+        ...makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 }),
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+          moodInertia: 0.5,
+          longTermDimensions: ['attachment', 'trust'],
+        },
+      };
+      const agent = identity.createAgent('E2E-7', card, 'enhanced');
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+      engine.setGenerateFn(async () => `session msg ${++callCount}`);
+      engine.start(agent.id);
+
+      // Multi-turn chat with events
+      await engine.onResponse('ok', ctx(agent.id, '你好'));
+      await engine.onResponse('ok', ctx(agent.id, '好孤独啊'));
+      expect(engine.getImpulseState(agent.id)!.activeEvents.find(e => e.name === 'loneliness')).toBeDefined();
+
+      // Record snapshots for trajectory
+      engine.advanceTime(10);
+      await engine.evaluateAll(agent.id);
+      engine.advanceTime(10);
+      await engine.evaluateAll(agent.id);
+
+      // Fire and deliver
+      setImpulseValue(engine, agent.id, 0.9);
+      await engine.evaluateAll(agent.id);
+      const msgs = engine.getPendingMessages(agent.id);
+      expect(msgs.length).toBeGreaterThanOrEqual(1);
+      engine.markDelivered(msgs[0].id);
+      db.prepare(`UPDATE proactive_messages SET delivered_at = datetime('now', '-5 minutes') WHERE id = ?`).run(msgs[0].id);
+
+      // User feedback
+      await engine.onResponse('谢谢', ctx(agent.id, '谢谢'));
+      const reactions = db.prepare('SELECT * FROM proactive_reactions WHERE agent_id = ?').all(agent.id) as any[];
+      expect(reactions.length).toBeGreaterThanOrEqual(1);
+
+      // Stop → triggers updateLongTermMood
+      engine.stop(agent.id);
+
+      // Verify long_term_mood persisted
+      const mood = engine.getLongTermMood(agent.id);
+      expect(mood.attachment).toBeDefined();
+      expect(mood.trust).toBeDefined();
+      expect(typeof mood.attachment).toBe('number');
+
+      // Verify reactions persisted
+      const allReactions = db.prepare('SELECT * FROM proactive_reactions WHERE agent_id = ?').all(agent.id) as any[];
+      expect(allReactions.length).toBeGreaterThanOrEqual(1);
+
+      // Verify long_term_mood rows in DB
+      const moodRows = db.prepare('SELECT * FROM long_term_mood WHERE agent_id = ?').all(agent.id) as any[];
+      expect(moodRows.length).toBeGreaterThanOrEqual(1);
+
+      vi.restoreAllMocks();
+    });
+  });
 });

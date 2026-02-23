@@ -108,6 +108,14 @@
   - ActiveEvent.confidence 字段, eventGate 改为 max(intensity × relevance × confidence)
   - LLM 不可用时 graceful degradation 到 regex 结果
 - 测试: 114 → 142 (28 个新 V3 测试, 全部通过)
+- **E2E 生命周期测试**: 142 → 149 (7 个端到端测试, 覆盖三大 feature 交互)
+  - 完整生命周期: 事件→生成→投递→反馈→阈值调整
+  - 去重阻断: 相似消息被跳过后反馈回路不受影响
+  - LLM 事件检测→impulse 积累→自适应阈值
+  - 忽略消息提高后续触发阈值
+  - 跨 agent 隔离: 反馈互不影响
+  - 去重+事件检测联合: 事件注入但消息被去重
+  - 完整会话生命周期: start→多轮对话→fire→stop→持久化验证
 
 ### 基础设施
 - 13 test files, Vitest 框架
@@ -118,7 +126,7 @@
 ### 测试现状 (2026-02-23)
 | 状态 | 数量 | 说明 |
 |------|------|------|
-| Passed | 142 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 新测试) |
+| Passed | 149 | 核心引擎测试 (含 30 个 V2 + 28 个 V3 + 7 个 E2E 生命周期测试) |
 | Failed | 4 | forgetter (NOT NULL 约束) ×2, growth (行为检测断言) ×2 |
 | Skipped | 41 | comparison.test.ts (需 sillytavern_test/ 数据) |
 
@@ -163,7 +171,7 @@
 
 | 项目 | 说明 |
 |------|------|
-| Proactive Engine 测试 | ✅ 142 tests (V1 84 + V2 30 + V3 28), 全覆盖 |
+| Proactive Engine 测试 | ✅ 149 tests (V1 84 + V2 30 + V3 28 + E2E 7), 全覆盖 |
 | HTTP adapter 集成测试 | 端点、认证、限流零覆盖 |
 | WebSocket 测试 | 推送逻辑无测试 |
 | Social Engine 测试 | 关系更新无测试 |
