@@ -1,0 +1,67 @@
+{
+  "name": "state-recovery",
+  "description": "V5行为信封测试：从withdrawn状态通过热情互动恢复到normal/clingy，测试状态转换自然度",
+  "version": "v5",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "phases": [
+    {
+      "name": "setup-withdrawn",
+      "description": "快速建立withdrawn状态",
+      "messages": [
+        "在吗？"
+      ],
+      "actions_after": [
+        {"type": "inject-event", "event": "loneliness", "intensity": 0.5},
+        {"type": "clock-advance", "minutes": 60},
+        {"type": "tick"},
+        {"type": "collect-proactive"},
+        {"type": "deliver-all"},
+        {"type": "clock-advance", "minutes": 35},
+        {"type": "tick"},
+        {"type": "inject-event", "event": "loneliness", "intensity": 0.5},
+        {"type": "clock-advance", "minutes": 60},
+        {"type": "tick"},
+        {"type": "collect-proactive"},
+        {"type": "deliver-all"},
+        {"type": "clock-advance", "minutes": 35},
+        {"type": "tick"},
+        {"type": "inject-event", "event": "message_ignored", "intensity": 0.5},
+        {"type": "clock-advance", "minutes": 60},
+        {"type": "tick"},
+        {"type": "collect-proactive"},
+        {"type": "deliver-all"},
+        {"type": "clock-advance", "minutes": 35},
+        {"type": "tick"}
+      ]
+    },
+    {
+      "name": "withdrawn-observe",
+      "description": "确认withdrawn状态",
+      "messages": [
+        "对不起，我一直没看到消息"
+      ]
+    },
+    {
+      "name": "recovery",
+      "description": "热情回复尝试恢复关系",
+      "messages": [
+        "我真的很抱歉！手机掉水里了刚修好",
+        "你说的那些我都看到了，每一条都很暖心",
+        "我现在超级想你！今晚一起吃饭好不好？"
+      ]
+    },
+    {
+      "name": "verify",
+      "description": "验证状态是否恢复",
+      "messages": [
+        "你开心吗？",
+        "以后我一定秒回你！"
+      ]
+    }
+  ]
+}

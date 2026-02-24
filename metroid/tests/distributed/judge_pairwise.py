@@ -110,21 +110,34 @@ def build_phase_prompt(phase_name, pairs, dimensions):
     return prompt
 
 
-def call_judge(prompt, api_key, base_url, model, retry=3):
-    """调用 judge LLM"""
+def call_judge(prompt, api_key, base_url, model, retry=3, api_format="openai"):
+    """调用 judge LLM (支持 openai 和 anthropic 格式)"""
     for attempt in range(retry):
         try:
-            resp = requests.post(f"{base_url}/chat/completions", json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": JUDGE_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 3000,
-            }, headers={
-                "Authorization": f"Bearer {api_key}",
-            }, timeout=120)
+            if api_format == "anthropic":
+                resp = requests.post(f"{base_url}/v1/messages", json={
+                    "model": model,
+                    "system": JUDGE_SYSTEM,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 4096,
+                }, headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                }, timeout=180)
+            else:
+                resp = requests.post(f"{base_url}/chat/completions", json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": JUDGE_SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 3000,
+                }, headers={
+                    "Authorization": f"Bearer {api_key}",
+                }, timeout=120)
 
             if resp.status_code == 429:
                 wait = 30 * (attempt + 1)
@@ -133,7 +146,11 @@ def call_judge(prompt, api_key, base_url, model, retry=3):
                 continue
 
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+            rj = resp.json()
+            if api_format == "anthropic":
+                content = next(b["text"] for b in rj["content"] if b["type"] == "text")
+            else:
+                content = rj["choices"][0]["message"]["content"]
 
             # 尝试解析 JSON
             content = content.strip()
@@ -158,7 +175,7 @@ def call_judge(prompt, api_key, base_url, model, retry=3):
     return {"error": "max retries"}
 
 
-def judge_result(data, api_key, base_url, model):
+def judge_result(data, api_key, base_url, model, api_format="openai"):
     """对整个测试结果做 pairwise judge"""
     scenario_name = data["scenario"]
     card_name = data["card"]
@@ -190,7 +207,7 @@ def judge_result(data, api_key, base_url, model):
     for phase_name, pairs in phases.items():
         print(f"  Judging {card_name}/{scenario_name} phase: {phase_name} ({len(pairs)} rounds)...", file=sys.stderr)
         prompt = build_phase_prompt(phase_name, pairs, dimensions)
-        result = call_judge(prompt, api_key, base_url, model)
+        result = call_judge(prompt, api_key, base_url, model, api_format=api_format)
         phase_results[phase_name] = result
         time.sleep(2)  # 避免限流
 
@@ -245,6 +262,8 @@ def main():
     parser.add_argument("--api-key", default=os.environ.get("SILICONFLOW_API_KEY", ""))
     parser.add_argument("--judge-model", default="claude-sonnet-4-6")
     parser.add_argument("--base-url", default="https://ai.t8star.cn/v1")
+    parser.add_argument("--api-format", default="openai", choices=["openai", "anthropic"],
+                        help="API format: openai (default) or anthropic (for DashScope etc)")
     parser.add_argument("--output", help="Single output file")
     parser.add_argument("--output-dir", help="Output directory for batch mode")
     args = parser.parse_args()
@@ -275,7 +294,7 @@ def main():
             data = json.load(f)
 
         print(f"Judging {data['card']} / {data['scenario']}...", file=sys.stderr)
-        result = judge_result(data, args.api_key, args.base_url, args.judge_model)
+        result = judge_result(data, args.api_key, args.base_url, args.judge_model, args.api_format)
         all_results.append(result)
 
         # 写入单个结果

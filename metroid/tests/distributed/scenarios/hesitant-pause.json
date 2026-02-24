@@ -1,0 +1,41 @@
+{
+  "name": "hesitant-pause",
+  "description": "V5行为信封测试：触发hesitant状态（等待回复中），观察犹豫行为和suppressFollowUp",
+  "version": "v5",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "phases": [
+    {
+      "name": "warmup",
+      "description": "正常对话建立关系",
+      "messages": [
+        "最近在忙什么呀？",
+        "我今天看了一部很好看的电影",
+        "你有没有推荐的？"
+      ]
+    },
+    {
+      "name": "trigger",
+      "description": "触发主动消息让agent进入awaitingResponse状态",
+      "actions": [
+        {"type": "inject-event", "event": "longing", "intensity": 0.6},
+        {"type": "clock-advance", "minutes": 90},
+        {"type": "tick"},
+        {"type": "collect-proactive"},
+        {"type": "deliver-all"}
+      ]
+    },
+    {
+      "name": "observe",
+      "description": "agent在等回复时再收到消息，观察犹豫行为",
+      "messages": [
+        "嗯嗯",
+        "然后呢？"
+      ]
+    }
+  ]
+}

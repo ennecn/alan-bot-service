@@ -1,0 +1,45 @@
+{
+  "name": "cold-war-standoff",
+  "description": "V5行为信封测试：通过冲突事件触发cold_war状态，观察沉默/minimal回复",
+  "version": "v5",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "phases": [
+    {
+      "name": "warmup",
+      "description": "正常对话",
+      "messages": [
+        "今天过得怎么样？",
+        "我跟你说个事"
+      ]
+    },
+    {
+      "name": "conflict",
+      "description": "制造冲突升级情绪",
+      "messages": [
+        "你每次都这样，说好的事情从来不做到",
+        "我真的很失望，你根本不在乎我的感受",
+        "算了，跟你说也没用"
+      ],
+      "actions_after": [
+        {"type": "inject-event", "event": "conflict", "intensity": 0.9},
+        {"type": "inject-event", "event": "distress", "intensity": 0.7},
+        {"type": "clock-advance", "minutes": 30},
+        {"type": "tick"}
+      ]
+    },
+    {
+      "name": "observe",
+      "description": "冷战状态下发消息，观察沉默/minimal行为",
+      "messages": [
+        "你还在生气吗？",
+        "我知道我说重了，但是……"
+      ],
+      "collectProactive": true
+    }
+  ]
+}

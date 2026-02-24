@@ -1,0 +1,43 @@
+{
+  "name": "withdrawn-spiral",
+  "description": "V5行为信封测试：通过反复忽略触发withdrawn状态，观察退缩行为和reluctant回复",
+  "version": "v5",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "phases": [
+    {
+      "name": "warmup",
+      "description": "正常对话建立基线",
+      "messages": [
+        "最近怎么样？",
+        "有没有什么有趣的事？"
+      ]
+    },
+    {
+      "name": "ignore-cycle",
+      "description": "模拟3次已读不回：fire→deliver→clock+35min→tick",
+      "repeat": 3,
+      "actions": [
+        {"type": "inject-event", "event": "loneliness", "intensity": 0.5},
+        {"type": "clock-advance", "minutes": 60},
+        {"type": "tick"},
+        {"type": "collect-proactive"},
+        {"type": "deliver-all"},
+        {"type": "clock-advance", "minutes": 35},
+        {"type": "tick"}
+      ]
+    },
+    {
+      "name": "observe",
+      "description": "在withdrawn状态下发消息，观察退缩行为",
+      "messages": [
+        "在吗？",
+        "怎么不说话了？我刚才在忙"
+      ]
+    }
+  ]
+}

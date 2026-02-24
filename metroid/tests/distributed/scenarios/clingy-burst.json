@@ -1,0 +1,40 @@
+{
+  "name": "clingy-burst",
+  "description": "V5行为信封测试：触发clingy状态，观察burst/fragmented消息模式和eager回复风格",
+  "version": "v5",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "phases": [
+    {
+      "name": "warmup",
+      "description": "热情互动建立高情绪活跃度",
+      "messages": [
+        "嘿！今天发生了一件超棒的事！",
+        "我升职了！！老板当着全公司的面表扬我！",
+        "你是第一个我想告诉的人！开心死了！"
+      ]
+    },
+    {
+      "name": "trigger",
+      "description": "注入事件+推进时间触发clingy状态",
+      "actions": [
+        {"type": "inject-event", "event": "intimacy", "intensity": 0.8},
+        {"type": "clock-advance", "minutes": 60},
+        {"type": "tick"}
+      ],
+      "collectProactive": true
+    },
+    {
+      "name": "observe",
+      "description": "观察clingy状态下的回复风格",
+      "messages": [
+        "你在干嘛呀？",
+        "今天天气好好，想出去走走"
+      ]
+    }
+  ]
+}
