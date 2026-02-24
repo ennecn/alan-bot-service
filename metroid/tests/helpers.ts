@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -16,7 +17,7 @@ export function createTestDb(): Database.Database {
 
 /** Insert a test agent and return its id */
 export function createTestAgent(db: Database.Database, name = 'test-agent'): string {
-  const id = `agent-${Date.now()}`;
+  const id = `agent-${randomUUID().slice(0, 8)}`;
   db.prepare(
     `INSERT INTO agents (id, name, card_json) VALUES (?, ?, '{}')`
   ).run(id, name);

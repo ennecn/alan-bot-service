@@ -214,6 +214,13 @@ export function getDb(config: MetroidConfig): Database.Database {
     );
   `);
 
+  // Migration: add last_reinforced_at column to behavioral_changes
+  const bcCols = db.prepare("PRAGMA table_info(behavioral_changes)").all() as any[];
+  if (!bcCols.some((c: any) => c.name === 'last_reinforced_at')) {
+    db.exec("ALTER TABLE behavioral_changes ADD COLUMN last_reinforced_at TEXT");
+    db.exec("UPDATE behavioral_changes SET last_reinforced_at = created_at WHERE last_reinforced_at IS NULL");
+  }
+
   return db;
 }
 

@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS behavioral_changes (
   confidence REAL NOT NULL DEFAULT 0.5,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  reverted_at TEXT
+  reverted_at TEXT,
+  last_reinforced_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_behavioral_agent

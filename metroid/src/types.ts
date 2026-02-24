@@ -62,6 +62,7 @@ export interface BehavioralChange {
   active: boolean;
   createdAt: Date;
   revertedAt?: Date;
+  lastReinforcedAt?: Date;
 }
 
 // === Identity Types ===
@@ -358,6 +359,7 @@ export interface EngineContext {
   message: MetroidMessage;
   conversationHistory: MetroidMessage[];
   userName?: string;
+  emotionTrajectory?: Record<string, { direction: 'rising' | 'falling' | 'stable'; delta: number; durationMin: number }>;
 }
 
 // === V8: Social Engine Types ===

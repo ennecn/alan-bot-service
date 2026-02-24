@@ -46,6 +46,8 @@ export interface MetroidConfig {
     evaluationInterval: number;  // evaluate every N messages
     minConfidence: number;       // threshold to apply change
     maxActiveChanges: number;    // cap on active behavioral changes
+    confidenceDecayRate: number;     // per-day decay (default 0.02)
+    confidenceDecayGraceDays: number; // grace period before decay starts (default 7)
   };
 
   // Proactive engine
@@ -102,6 +104,8 @@ export const defaultConfig: MetroidConfig = {
     evaluationInterval: 10,
     minConfidence: 0.5,
     maxActiveChanges: 20,
+    confidenceDecayRate: 0.02,
+    confidenceDecayGraceDays: 7,
   },
 
   proactive: {

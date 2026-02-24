@@ -2655,10 +2655,21 @@ describe('ProactiveEngine', () => {
       const card = makeImpulseCard({ fireThreshold: 0.3, cooldownMinutes: 0 });
       const agent = identity.createAgent('E2E-4', card, 'enhanced');
       vi.spyOn(Math, 'random').mockReturnValue(0);
-      // Use very distinct messages to avoid dedup
-      const topics = ['天气', '电影', '音乐', '旅行', '美食', '运动', '读书', '游戏', '工作', '学习'];
+      // Use completely different messages to avoid bigram Jaccard dedup
+      const messages = [
+        '今天天气真好，阳光明媚适合出门散步',
+        '最近看了一部科幻电影，特效非常震撼',
+        '周末打算去爬山，锻炼一下身体',
+        '新学了一道红烧肉的做法，味道不错',
+        '读完了三体第二部，黑暗森林理论太精彩了',
+        '昨天和朋友打了一场篮球赛，赢了好开心',
+        '最近在学吉他，手指都磨出茧子了',
+        '公司新来了一个同事，人很有趣',
+        '家里的猫咪今天特别粘人，一直蹭我',
+        '刚泡了一杯龙井茶，清香扑鼻好舒服',
+      ];
       let callCount = 0;
-      engine.setGenerateFn(async () => `今天聊聊${topics[callCount++ % topics.length]}的话题，你觉得怎么样？`);
+      engine.setGenerateFn(async () => messages[callCount++ % messages.length]);
       engine.start(agent.id);
 
       // Generate and deliver 10 messages with no user reply
@@ -2708,13 +2719,33 @@ describe('ProactiveEngine', () => {
       await new Promise(r => setTimeout(r, 5));
       const agent2 = identity.createAgent('IsoBeta', card, 'enhanced');
       vi.spyOn(Math, 'random').mockReturnValue(0); // mock AFTER createAgent
-      const topics1 = ['猫咪', '狗狗', '兔子', '仓鼠', '鹦鹉', '金鱼', '乌龟', '蜥蜴', '蛇', '蜘蛛'];
-      const topics2 = ['苹果', '香蕉', '橙子', '葡萄', '草莓', '西瓜', '芒果', '桃子', '梨子', '樱桃'];
+      const messages1 = [
+        '你喜欢猫咪吗？它们毛茸茸的真可爱',
+        '今天看到一只金毛犬在公园里奔跑',
+        '邻居家的兔子生了一窝小宝宝',
+        '仓鼠在滚轮上跑个不停太搞笑了',
+        '阳台上飞来一只鹦鹉，羽毛好漂亮',
+        '鱼缸里的金鱼游来游去好治愈',
+        '乌龟慢悠悠地爬着，一点都不着急',
+        '蜥蜴趴在石头上晒太阳，纹路好特别',
+        '蛇蜕皮的过程真的很神奇',
+        '蜘蛛织网的技术简直是天才建筑师',
+      ];
+      const messages2 = [
+        '刚吃了一个苹果，又脆又甜',
+        '香蕉配酸奶做早餐营养又美味',
+        '橙子榨汁加冰块，夏天最爽的饮料',
+        '葡萄一颗一颗吃停不下来',
+        '草莓蛋糕是我最喜欢的甜点',
+        '西瓜冰镇后切开，红瓤黑籽太诱人',
+        '芒果千层蛋糕的口感层次分明',
+        '桃子汁水丰富，咬一口满嘴香甜',
+        '梨子炖冰糖润喉又养生',
+        '樱桃虽然贵但是真的好吃',
+      ];
       engine.setGenerateFn(async () => {
         const idx = callCount++;
-        return idx < 10
-          ? `你喜欢${topics1[idx]}吗？它们真的很可爱呢`
-          : `今天吃了${topics2[idx - 10]}，味道不错哦`;
+        return idx < 10 ? messages1[idx] : messages2[idx - 10];
       });
       engine.start(agent1.id);
       engine.start(agent2.id);

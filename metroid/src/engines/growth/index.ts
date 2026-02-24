@@ -128,9 +128,44 @@ export class GrowthEngine implements Engine {
 
   // === Internal ===
 
+  /** Decay confidence of behavioral changes that haven't been reinforced recently */
+  private applyConfidenceDecay(agentId: string): void {
+    const graceDays = this.config.growth.confidenceDecayGraceDays;
+    const decayRate = this.config.growth.confidenceDecayRate;
+    const minConf = this.config.growth.minConfidence;
+    const now = new Date();
+
+    const rows = this.db.prepare(
+      'SELECT id, confidence, last_reinforced_at, created_at FROM behavioral_changes WHERE agent_id = ? AND active = 1'
+    ).all(agentId) as any[];
+
+    for (const row of rows) {
+      const reinforcedAt = new Date(row.last_reinforced_at || row.created_at);
+      const daysSinceReinforced = (now.getTime() - reinforcedAt.getTime()) / 86_400_000;
+      if (daysSinceReinforced <= graceDays) continue;
+
+      const daysPastGrace = daysSinceReinforced - graceDays;
+      const newConf = row.confidence - decayRate * daysPastGrace;
+
+      if (newConf < minConf) {
+        // Deactivate — confidence too low
+        this.db.prepare(
+          'UPDATE behavioral_changes SET active = 0, confidence = ?, reverted_at = datetime(?) WHERE id = ?'
+        ).run(Math.max(0, newConf), now.toISOString(), row.id);
+      } else {
+        this.db.prepare(
+          'UPDATE behavioral_changes SET confidence = ? WHERE id = ?'
+        ).run(newConf, row.id);
+      }
+    }
+  }
+
   private async evaluateGrowth(agentId: string, recentMessages: string[]): Promise<void> {
     const agent = this.identity.getAgent(agentId);
     if (!agent?.card.growth?.enabled) return;
+
+    // Apply confidence decay before evaluation
+    this.applyConfidenceDecay(agentId);
 
     // Check active changes cap
     const activeCount = this.db.prepare(
@@ -145,11 +180,17 @@ export class GrowthEngine implements Engine {
     }
 
     for (const pattern of patterns) {
-      // Check if similar adaptation already exists
+      // Check if similar adaptation already exists — reinforce if so
       const existing = this.db.prepare(
-        'SELECT id FROM behavioral_changes WHERE agent_id = ? AND active = 1 AND adaptation = ?'
+        'SELECT id, confidence FROM behavioral_changes WHERE agent_id = ? AND active = 1 AND adaptation = ?'
       ).get(agentId, pattern.adaptation) as any;
-      if (existing) continue;
+      if (existing) {
+        const newConf = Math.min(1.0, existing.confidence + 0.05);
+        this.db.prepare(
+          'UPDATE behavioral_changes SET confidence = ?, last_reinforced_at = datetime(?) WHERE id = ?'
+        ).run(newConf, new Date().toISOString(), existing.id);
+        continue;
+      }
 
       // Check immutable values
       if (this.violatesImmutableValues(agent.card.soul?.immutableValues ?? [], pattern.adaptation)) {
@@ -410,6 +451,7 @@ ${snippet}
       active: !!row.active,
       createdAt: new Date(row.created_at),
       revertedAt: row.reverted_at ? new Date(row.reverted_at) : undefined,
+      lastReinforcedAt: row.last_reinforced_at ? new Date(row.last_reinforced_at) : undefined,
     };
   }
 }

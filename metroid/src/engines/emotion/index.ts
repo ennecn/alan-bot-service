@@ -86,7 +86,22 @@ export class EmotionEngine implements Engine {
     const hints = this.translateToStyleHints(recovered, intensityDial, expressiveness);
     if (!hints) return [];
 
-    const content = `<emotion_context>\n${hints}\n</emotion_context>`;
+    // Append emotion trajectory if available
+    let trajectoryLine = '';
+    if (context.emotionTrajectory) {
+      const nonStable = Object.entries(context.emotionTrajectory)
+        .filter(([, v]) => v.direction !== 'stable');
+      if (nonStable.length > 0) {
+        const parts = nonStable.map(([axis, v]) => {
+          const axisName = axis === 'pleasure' ? '愉悦度' : axis === 'arousal' ? '激活度' : '支配感';
+          const dir = v.direction === 'rising' ? '上升中' : '下降中';
+          return `${axisName}${dir} (${v.delta > 0 ? '+' : ''}${v.delta.toFixed(2)}, 过去${v.durationMin}分钟)`;
+        });
+        trajectoryLine = `\n情绪趋势: ${parts.join(', ')}`;
+      }
+    }
+
+    const content = `<emotion_context>\n${hints}${trajectoryLine}\n</emotion_context>`;
     return [{
       source: 'emotion',
       content,

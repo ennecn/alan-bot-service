@@ -195,6 +195,7 @@ export class Metroid {
       message,
       conversationHistory: history,
       userName: message.author.name,
+      emotionTrajectory: mode === 'enhanced' ? this.proactive.computeTrajectory(agentId) : undefined,
     };
 
     // Compile prompt — identity + memory + other engines contribute fragments

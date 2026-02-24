@@ -76,6 +76,9 @@ export class ProactiveEngine implements Engine {
   // === V9: Idle focus rotation counter ===
   private idleCounter = new Map<string, number>();
 
+  // === V6: Debug relationship lock (prevents async LLM overwrite after setRelationship) ===
+  private debugRelationshipLock = new Set<string>(); // "agentId:userId" → permanent lock from setRelationship
+
   // === V6: Relationship & Inner Life ===
   private lastBehavioralState = new Map<string, BehavioralState>(); // agentId → last known state
   private tickCount = new Map<string, number>(); // agentId → tick counter for ambient monologue
@@ -217,17 +220,18 @@ export class ProactiveEngine implements Engine {
       getRelationship: this.db.prepare(`SELECT * FROM user_relationships WHERE agent_id = ? AND user_id = ?`),
       upsertRelationship: this.db.prepare(`
         INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity, last_interaction, updated_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        VALUES (?, ?, ?, ?, ?, datetime(?), datetime(?))
         ON CONFLICT(agent_id, user_id) DO UPDATE SET
           attachment = excluded.attachment, trust = excluded.trust,
-          familiarity = excluded.familiarity, last_interaction = datetime('now'),
-          updated_at = datetime('now')
+          familiarity = excluded.familiarity, last_interaction = datetime(?),
+          updated_at = datetime(?)
       `),
       // V6: inner monologue
       insertMonologue: this.db.prepare(`
         INSERT INTO inner_monologues (id, agent_id, user_id, trigger, content, emotion_snapshot)
         VALUES (?, ?, ?, ?, ?, ?)
       `),
+      getRelationshipsForAgent: this.db.prepare(`SELECT * FROM user_relationships WHERE agent_id = ?`),
       getRecentMonologues: this.db.prepare(`
         SELECT * FROM inner_monologues WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?
       `),
@@ -298,13 +302,56 @@ export class ProactiveEngine implements Engine {
     const attachment = values.attachment ?? current.attachment;
     const trust = values.trust ?? current.trust;
     const familiarity = values.familiarity ?? current.familiarity;
-    this.stmts.upsertRelationship.run(agentId, userId, attachment, trust, familiarity);
+    const ts = this.nowDate().toISOString();
+    this.stmts.upsertRelationship.run(agentId, userId, attachment, trust, familiarity, ts, ts, ts, ts);
+    // Permanently lock this relationship to prevent async LLM overwrite
+    this.debugRelationshipLock.add(`${agentId}:${userId}`);
     return this.getRelationship(agentId, userId);
+  }
+
+  /**
+   * V6: Apply time-based decay to attachment and trust.
+   * - 24h grace period after last interaction (no decay)
+   * - After grace: attachment *= pow(0.995, hours_past_grace), trust *= pow(0.997, hours_past_grace)
+   * - Familiarity NEVER decays
+   */
+  private applyRelationshipDecay(agentId: string): void {
+    const rows = this.stmts.getRelationshipsForAgent.all(agentId) as any[];
+    if (!rows.length) return;
+    const now = this.now();
+    const GRACE_HOURS = 24;
+    for (const row of rows) {
+      const lastInteraction = new Date(row.last_interaction).getTime();
+      const hoursSinceInteraction = (now - lastInteraction) / 3_600_000;
+      if (hoursSinceInteraction <= GRACE_HOURS) continue; // within grace period
+      const hoursPastGrace = hoursSinceInteraction - GRACE_HOURS;
+      const attDecay = Math.pow(0.995, hoursPastGrace);
+      const trustDecay = Math.pow(0.997, hoursPastGrace);
+      const newAtt = row.attachment * attDecay;
+      const newTrust = row.trust * trustDecay;
+      // Only write if there's meaningful change (avoid DB churn)
+      if (Math.abs(newAtt - row.attachment) > 0.0001 || Math.abs(newTrust - row.trust) > 0.0001) {
+        const ts = this.nowDate().toISOString();
+        // Preserve last_interaction (don't reset it — decay shouldn't count as interaction)
+        this.db.prepare(`
+          UPDATE user_relationships SET attachment = ?, trust = ?, updated_at = datetime(?)
+          WHERE agent_id = ? AND user_id = ?
+        `).run(newAtt, newTrust, ts, agentId, row.user_id);
+      }
+    }
   }
 
   /** V6: Update relationship via LLM analysis */
   private async updateRelationshipViaLLM(agentId: string, userId: string, messageContent: string, agentResponse: string): Promise<void> {
     if (!this.analyzeFn) return;
+    // Skip if debug-locked (setRelationship was called — permanent lock for this session)
+    const lockKey = `${agentId}:${userId}`;
+    if (this.debugRelationshipLock.has(lockKey)) {
+      console.log(`[V6] Skipping LLM relationship update for ${userId} — debug-locked`);
+      return;
+    }
+    console.log(`[V6] Running LLM relationship update for ${userId} (no lock)`);
+
     const agent = this.identity.getAgent(agentId);
     const current = this.getRelationship(agentId, userId);
     const prompt = `分析这段对话对关系的影响。
@@ -315,12 +362,19 @@ export class ProactiveEngine implements Engine {
 
     try {
       const raw = await this.analyzeFn(prompt);
+      // Re-check lock AFTER LLM call (setRelationship may have been called while we waited)
+      if (this.debugRelationshipLock.has(lockKey)) {
+        console.log(`[V6] Skipping LLM relationship write for ${userId} — debug-locked (post-LLM)`);
+        return;
+      }
       const parsed = JSON.parse(raw.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
       const volatility = agent?.card.relationship?.relationshipVolatility ?? 0.3;
       const newAttachment = clamp(current.attachment + (parsed.attachment_delta ?? 0) * volatility, -1, 1);
       const newTrust = clamp(current.trust + (parsed.trust_delta ?? 0) * volatility, -1, 1);
       const newFamiliarity = Math.min(1, current.familiarity + 0.01);
-      this.stmts.upsertRelationship.run(agentId, userId, newAttachment, newTrust, newFamiliarity);
+      const ts = this.nowDate().toISOString();
+      this.stmts.upsertRelationship.run(agentId, userId, newAttachment, newTrust, newFamiliarity, ts, ts, ts, ts);
+      console.log(`[V6] LLM relationship update: ${userId} att=${newAttachment.toFixed(3)} trust=${newTrust.toFixed(3)} fam=${newFamiliarity.toFixed(3)}`);
     } catch (err) {
       console.error(`[V6] Failed to update relationship via LLM:`, err);
     }
@@ -790,6 +844,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
     this.recordEmotionSnapshot(agentId); // ensure manual ticks also record snapshots
     this.markStaleAsIgnored(agentId); // V3: mark stale messages as ignored
     this.cleanEmbeddingCache(); // V3: clean dedup cache
+    this.applyRelationshipDecay(agentId); // V6: decay attachment/trust over time
     await this.evaluateTriggers(agentId);
     const agent = this.identity.getAgent(agentId);
     if (agent?.card.proactive?.impulse?.enabled) {
