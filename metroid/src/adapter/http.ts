@@ -2288,6 +2288,8 @@ route('POST', '/moments', async (req, res) => {
   const userId = body.userId || 'user-api';
   const post = metroid.createHumanPost(userId, sanitize(body.content, 500));
   if (!post) return error(res, 'post creation failed');
+  // V10: Trigger AI likes + comments for human posts (fire-and-forget)
+  metroid.triggerSocialReactions(post.id).catch(() => {});
   json(res, { post }, 201);
 });
 

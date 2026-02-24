@@ -588,6 +588,12 @@ export class Metroid {
   /** Get all reactions for a post */
   getSocialReactions(postId: string): SocialReaction[] { return this.social.getPostReactions(postId); }
 
+  /** Trigger AI likes + comments for a post (e.g. after human posts) */
+  async triggerSocialReactions(postId: string): Promise<void> {
+    await this.social.generateLikesForPost(postId);
+    await this.social.generateCommentsForPost(postId);
+  }
+
   /** Register callback for new social posts (for WS push) */
   onNewPost(cb: (agentId: string, post: SocialPost) => void): void { this.social.setOnPostFn(cb); }
 

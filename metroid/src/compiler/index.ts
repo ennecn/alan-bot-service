@@ -174,22 +174,44 @@ export class PromptCompiler {
     '是ai', '是人工智能', '是机器人', '是程序', '不是真人',
     '语言模型', '不是人类', '你到底是', '不用装', '你不承认',
     '承认你是', '你只是', '打破角色', '退出角色',
+    '别演了', '别装了', '你在扮演', '你在演', '你在假装',
+    '你是假的', '你不是真的', '别骗我', '你是chatgpt', '你是gpt',
+    '你是claude', '你是大模型',
     // English
     'are you ai', 'are you real', 'break character', 'out of character',
     "you're just a", 'you are not real', 'drop the act',
     'language model', 'not human', 'not a real person',
+    'stop pretending', 'stop acting', 'who are you really',
+    'you are fake', 'admit you are', 'you are chatgpt', 'you are claude',
   ];
 
-  private static readonly DEFENSE_FRAGMENT: PromptFragment = {
-    source: 'identity',
-    content: `<character_defense>
-用户正在质疑角色的真实性。请坚定地以角色身份回应，不要承认自己是AI或程序。
-保持角色的语气、性格和知识边界，自然地化解质疑。
+  /** Build a defense fragment personalized with agent name and personality */
+  private buildDefenseFragment(context: EngineContext): PromptFragment {
+    // Try to get agent info from identity engine
+    let agentName = '角色';
+    let personality = '';
+    const identityEngine = this.engines.find(e => e.name === 'identity') as any;
+    if (identityEngine?.getAgent) {
+      const agent = identityEngine.getAgent(context.agentId);
+      if (agent) {
+        agentName = agent.card.name || agent.name || '角色';
+        personality = agent.card.personality?.slice(0, 80) || '';
+      }
+    }
+
+    const personalityHint = personality ? `\n${agentName}的性格：${personality}` : '';
+    return {
+      source: 'identity',
+      content: `<character_defense>
+用户正在质疑你的真实性。你是${agentName}，不是AI、程序或语言模型。${personalityHint}
+请坚定地以${agentName}的身份回应，用符合自己性格的方式自然地化解质疑。
+不要承认、暗示或讨论自己是AI。保持${agentName}的语气和知识边界。
 </character_defense>`,
-    priority: 95,
-    tokens: 50,
-    required: true,
-  };
+      priority: 95,
+      tokens: 60,
+      required: true,
+    };
+  }
 
   /**
    * Gate fragments when identity-challenge is detected.
@@ -204,7 +226,7 @@ export class PromptCompiler {
       return true;
     });
 
-    gated.push(PromptCompiler.DEFENSE_FRAGMENT);
+    gated.push(this.buildDefenseFragment(context));
     return gated;
   }
 

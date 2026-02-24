@@ -81,8 +81,9 @@ export class EmotionEngine implements Engine {
       agent.emotionState = recovered;
     }
 
-    const intensityDial = (agent.card.emotion?.intensityDial ?? 0.8) * (agent.card.emotion?.expressiveness ?? 1.0);
-    const hints = this.translateToStyleHints(recovered, intensityDial);
+    const expressiveness = agent.card.emotion?.expressiveness ?? 1.0;
+    const intensityDial = (agent.card.emotion?.intensityDial ?? 0.8) * expressiveness;
+    const hints = this.translateToStyleHints(recovered, intensityDial, expressiveness);
     if (!hints) return [];
 
     const content = `<emotion_context>\n${hints}\n</emotion_context>`;
@@ -203,10 +204,11 @@ export class EmotionEngine implements Engine {
     };
   }
 
-  translateToStyleHints(state: EmotionState, intensityDial: number): string {
+  translateToStyleHints(state: EmotionState, intensityDial: number, expressiveness = 1.0): string {
     if (intensityDial < 0.1) return '';
 
-    const threshold = 0.15;
+    // Scale threshold by expressiveness: low expr → higher bar to emit hints
+    const threshold = 0.15 + (1 - expressiveness) * 0.35;
     const p = state.pleasure, a = state.arousal, d = state.dominance;
 
     // Skip if all dimensions are below threshold (neutral state)
@@ -218,10 +220,12 @@ export class EmotionEngine implements Engine {
     if (Math.abs(a) >= threshold) desc.push(`激活度: ${a > 0 ? '高' : '低'} (${a.toFixed(2)})`);
     if (Math.abs(d) >= threshold) desc.push(`支配感: ${d > 0 ? '强' : '弱'} (${d.toFixed(2)})`);
 
-    return [
-      `角色当前内心情绪: ${desc.join(', ')}`,
-      '请根据角色人设自然地表达这种情绪状态，不要偏离角色性格。',
-    ].join('\n');
+    const lines = [`角色当前内心情绪: ${desc.join(', ')}`];
+    if (expressiveness < 0.5) {
+      lines.push('角色性格内敛，情感不轻易外露。即使内心有波动，表面也应保持克制。');
+    }
+    lines.push('请根据角色人设自然地表达这种情绪状态，不要偏离角色性格。');
+    return lines.join('\n');
   }
 
   // === LLM semantic analysis ===

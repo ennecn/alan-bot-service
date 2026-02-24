@@ -220,22 +220,37 @@ describe('EmotionEngine', () => {
   describe('translateToStyleHints', () => {
     it('should map high P + high A to lively style', () => {
       const hints = engine.translateToStyleHints({ pleasure: 0.5, arousal: 0.5, dominance: 0 }, 0.5);
-      expect(hints).toContain('活泼');
+      expect(hints).toContain('正面');
+      expect(hints).toContain('高');
     });
 
     it('should map low P + low A to subdued style', () => {
       const hints = engine.translateToStyleHints({ pleasure: -0.5, arousal: -0.5, dominance: 0 }, 0.5);
-      expect(hints).toContain('简短');
+      expect(hints).toContain('负面');
+      expect(hints).toContain('低');
     });
 
     it('should map high D to confident style', () => {
       const hints = engine.translateToStyleHints({ pleasure: 0, arousal: 0, dominance: 0.5 }, 0.5);
-      expect(hints).toContain('自信');
+      expect(hints).toContain('强');
     });
 
     it('should return empty for near-zero state', () => {
       const hints = engine.translateToStyleHints({ pleasure: 0.05, arousal: 0.05, dominance: 0.05 }, 0.5);
       expect(hints).toBe('');
+    });
+
+    it('should raise threshold for low expressiveness', () => {
+      // With expressiveness=0.3, threshold = 0.15 + 0.7*0.35 = 0.395
+      // So pleasure=0.3 should NOT produce hints
+      const hints = engine.translateToStyleHints({ pleasure: 0.3, arousal: 0, dominance: 0 }, 0.5, 0.3);
+      expect(hints).toBe('');
+    });
+
+    it('should add restraint hint for low expressiveness', () => {
+      // With expressiveness=0.3, threshold=0.395, pleasure=0.5 passes
+      const hints = engine.translateToStyleHints({ pleasure: 0.5, arousal: 0, dominance: 0 }, 0.5, 0.3);
+      expect(hints).toContain('内敛');
     });
   });
 });

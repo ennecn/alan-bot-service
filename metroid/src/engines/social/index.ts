@@ -429,6 +429,9 @@ export class SocialEngine implements Engine {
 
   /** Called on each proactive tick — may generate a social event post */
   async socialTick(agentId: string, behavioralState: BehavioralState, emotionState: EmotionState): Promise<void> {
+    // V10: Check for neglected posts regardless of other gates
+    this.checkLowInteractionPosts(agentId);
+
     const agent = this.identity.getAgent(agentId);
     if (!agent?.card.social?.connections?.length) return;
 
@@ -473,6 +476,27 @@ export class SocialEngine implements Engine {
       }
     } catch (err) {
       console.error(`[V8] Social tick post generation failed:`, err);
+    }
+  }
+
+  /** V10: Check for low-interaction posts and nudge emotion down */
+  checkLowInteractionPosts(agentId: string): void {
+    if (!this.emotion) return;
+
+    // Find agent posts from 2-4 hours ago with 0 reactions
+    const posts = this.stmts.getAgentPosts.all(agentId, 10) as any[];
+    const now = Date.now();
+    for (const post of posts) {
+      if (post.author_type !== 'agent') continue;
+      const ageMs = now - new Date(post.created_at).getTime();
+      const ageHours = ageMs / 3_600_000;
+      if (ageHours < 2 || ageHours > 4) continue;
+
+      const reactions = this.stmts.getPostReactions.all(post.id) as any[];
+      if (reactions.length === 0) {
+        (this.emotion as any).nudge?.(agentId, { pleasure: -0.05, arousal: 0, dominance: -0.02 }, 'social_neglect');
+        break; // Only one nudge per tick
+      }
     }
   }
 
@@ -583,6 +607,7 @@ export class SocialEngine implements Engine {
       const prompt = `你是${commenterAgent.card.name}。${commenter.personality ? `性格：${commenter.personality}` : ''}
 你看到了朋友的朋友圈：
 "${post.content}"
+这是公开的朋友圈，注意分寸，不要透露私密信息。
 请写一条简短评论（30字以内），保持你的性格。仅返回评论文本，不要引号。`;
 
       try {
