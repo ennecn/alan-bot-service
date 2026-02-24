@@ -8,7 +8,7 @@ import type {
   Engine, EngineContext, PromptFragment,
   ProactiveTrigger, ProactiveTriggerType, ProactiveMessage,
   EmotionState, ImpulseState, ImpulseSignal, ActiveEvent,
-  AgentIdentity,
+  AgentIdentity, BehavioralEnvelope, BehavioralState, MessagePattern, MessagePlan,
 } from '../../types.js';
 
 /** Timestamped emotion snapshot for ring buffer */
@@ -194,6 +194,11 @@ export class ProactiveEngine implements Engine {
       countReactionsSince: this.db.prepare(`
         SELECT COUNT(*) as cnt FROM proactive_reactions
         WHERE agent_id = ? AND created_at > datetime('now', '-7 days')
+      `),
+      // V5: count specific reaction type in last 24h
+      countRecentReactions: this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM proactive_reactions
+        WHERE agent_id = ? AND reaction = ? AND created_at > datetime('now', '-1 day')
       `),
     };
   }
@@ -649,6 +654,7 @@ export class ProactiveEngine implements Engine {
         memoryPressure: 0,
         lastMemoryPressureTime: this.now(),
         awaitingResponse: false,
+        inbox: [],
       });
     }
   }
@@ -933,6 +939,187 @@ export class ProactiveEngine implements Engine {
     }
   }
 
+  // ============================================================
+  // V5: Behavioral Envelope
+  // ============================================================
+
+  /** Count specific reaction type in last 24h */
+  getRecentReactionCount(agentId: string, reaction: string): number {
+    const row = this.stmts.countRecentReactions.get(agentId, reaction) as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  }
+
+  /** Evaluate behavioral state from V4 signals — deterministic, zero LLM calls */
+  evaluateBehavioralState(agentId: string, agent: AgentIdentity): BehavioralEnvelope {
+    const state = this.impulseStates.get(agentId);
+    const emotionCfg = agent.card.emotion;
+    const expressiveness = emotionCfg?.expressiveness ?? 0.5;
+    const restraint = emotionCfg?.restraint ?? 0.3;
+    const resilience = emotionCfg?.resilience ?? 0.5;
+
+    // Compute emotion distance from baseline
+    const currentEmotion = this.emotion.getState(agentId);
+    const baseline = emotionCfg?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    const emotionDist = currentEmotion ? Math.sqrt(
+      (currentEmotion.pleasure - baseline.pleasure) ** 2 +
+      (currentEmotion.arousal - baseline.arousal) ** 2 +
+      (currentEmotion.dominance - baseline.dominance) ** 2
+    ) : 0;
+
+    const memoryPressure = state?.memoryPressure ?? 0;
+    const impulseValue = state?.value ?? 0;
+    const awaitingResponse = state?.awaitingResponse ?? false;
+    const activeEvents = state?.activeEvents ?? [];
+
+    const ignoredCount = this.getRecentReactionCount(agentId, 'ignored');
+    const engagedCount = this.getRecentReactionCount(agentId, 'engaged');
+
+    const lastActive = this.lastActivity.get(agentId) ?? this.now();
+    const idleMinutes = (this.now() - lastActive) / 60_000;
+
+    // Character behavioral overrides
+    const behavioralCfg = agent.card.behavioral;
+    const overrides = behavioralCfg?.stateOverrides;
+
+    // State determination (priority high → low)
+    let envelope: BehavioralEnvelope;
+
+    // 1. cold_war: high-intensity negative event + high emotionDist + restraint
+    const hasNegativeEvent = activeEvents.some(e =>
+      (e.name === 'conflict' || e.name === 'distress') && e.intensity > 0.6
+    );
+    if (hasNegativeEvent && emotionDist > 0.8 && restraint > 0.4) {
+      envelope = {
+        state: 'cold_war',
+        responseMode: Math.random() < 0.8 ? 'silent' : 'reluctant',
+        messagePattern: 'minimal',
+        replyProbability: 0.15 + resilience * 0.2,
+        delayRange: [300_000, 1_800_000], // 5-30min
+        maxMessages: 1,
+        emotionalTone: '你很生气/受伤，选择沉默。如果回复，用最少的字。',
+        suppressFollowUp: true,
+      };
+    }
+    // 2. withdrawn: ignored >= 3 + pressure, or message_ignored event
+    else if (
+      (ignoredCount >= 3 && memoryPressure > 0.3) ||
+      activeEvents.some(e => e.name === 'message_ignored' && e.intensity > 0.3)
+    ) {
+      const delayBase: [number, number] = [120_000, 900_000]; // 2-15min
+      const delayMul = 1 + ignoredCount * 0.3;
+      envelope = {
+        state: 'withdrawn',
+        responseMode: 'reluctant',
+        messagePattern: memoryPressure > 0.6 ? 'minimal' : 'single',
+        replyProbability: 0.5 + expressiveness * 0.3,
+        delayRange: [delayBase[0] * delayMul, delayBase[1] * delayMul],
+        maxMessages: 1,
+        emotionalTone: resilience > 0.5
+          ? '有点失落但还是想聊'
+          : '不太想说话，怕又被忽略',
+        suppressFollowUp: true,
+      };
+    }
+    // 3. clingy: high impulse + active emotion + no ignores + expressive
+    else if (impulseValue > 0.5 && emotionDist > 0.3 && ignoredCount === 0 && expressiveness > 0.5) {
+      envelope = {
+        state: 'clingy',
+        responseMode: 'eager',
+        messagePattern: Math.random() < 0.5 ? 'burst' : 'fragmented',
+        replyProbability: 1.0,
+        delayRange: [0, 3000], // 0-3s
+        maxMessages: 2 + Math.floor(expressiveness * 2), // 2-4
+        emotionalTone: '看到消息很开心，想分享很多事情。',
+        suppressFollowUp: false,
+      };
+    }
+    // 4. hesitant: awaiting response or high restraint + some impulse
+    else if (awaitingResponse || (restraint > 0.6 && impulseValue > 0.3)) {
+      envelope = {
+        state: 'hesitant',
+        responseMode: 'normal',
+        messagePattern: 'single',
+        replyProbability: 0.8,
+        delayRange: [30_000, 300_000], // 30s-5min
+        maxMessages: 1,
+        emotionalTone: '想说但在犹豫要不要说',
+        suppressFollowUp: true,
+      };
+    }
+    // 5. normal: default
+    else {
+      envelope = {
+        state: 'normal',
+        responseMode: 'normal',
+        messagePattern: 'single',
+        replyProbability: 1.0,
+        delayRange: [1000, 10_000], // 1-10s
+        maxMessages: 1,
+        emotionalTone: '',
+        suppressFollowUp: false,
+      };
+    }
+
+    // Apply character stateOverrides
+    if (overrides?.[envelope.state]) {
+      const o = overrides[envelope.state]!;
+      if (o.emotionalTone) envelope.emotionalTone = o.emotionalTone;
+      if (o.replyProbabilityMod != null) {
+        envelope.replyProbability = Math.max(0, Math.min(1, envelope.replyProbability + o.replyProbabilityMod));
+      }
+      if (o.delayMod != null) {
+        envelope.delayRange = [envelope.delayRange[0] * o.delayMod, envelope.delayRange[1] * o.delayMod];
+      }
+      if (o.preferredPattern) envelope.messagePattern = o.preferredPattern;
+    }
+
+    // Random perturbation
+    envelope.replyProbability = Math.max(0, Math.min(1,
+      envelope.replyProbability + (Math.random() - 0.5) * 0.2
+    ));
+    const delayJitter = 0.8 + Math.random() * 0.4; // 0.8-1.2
+    envelope.delayRange = [envelope.delayRange[0] * delayJitter, envelope.delayRange[1] * delayJitter];
+
+    // Append neverDo/alwaysDo to emotionalTone
+    if (behavioralCfg?.neverDo?.length) {
+      envelope.emotionalTone += (envelope.emotionalTone ? '\n' : '') + `绝对不要: ${behavioralCfg.neverDo.join('、')}`;
+    }
+    if (behavioralCfg?.alwaysDo?.length) {
+      envelope.emotionalTone += (envelope.emotionalTone ? '\n' : '') + `一定要: ${behavioralCfg.alwaysDo.join('、')}`;
+    }
+
+    return envelope;
+  }
+
+  /** Parse LLM output into MessagePlan */
+  private parseMessagePlan(content: string, envelope: BehavioralEnvelope): MessagePlan {
+    const msgRegex = /\[MSG\]([\s\S]*?)\[\/MSG\]/g;
+    const matches = [...content.matchAll(msgRegex)];
+
+    if (matches.length > 0) {
+      const messages = matches
+        .slice(0, envelope.maxMessages)
+        .map((m, i) => ({
+          text: m[1].trim(),
+          delayMs: i === 0 ? 0 : this.computeMessageDelay(envelope.messagePattern),
+        }))
+        .filter(m => m.text.length > 0);
+      if (messages.length > 0) return { messages, envelope };
+    }
+
+    // Fallback: treat entire content as single message
+    return { messages: [{ text: content, delayMs: 0 }], envelope };
+  }
+
+  /** Compute inter-message delay based on pattern */
+  private computeMessageDelay(pattern: MessagePattern): number {
+    switch (pattern) {
+      case 'burst': return 1000 + Math.random() * 2000;      // 1-3s
+      case 'fragmented': return 3000 + Math.random() * 5000;  // 3-8s
+      default: return 0;
+    }
+  }
+
   /** Check if all conditions in an emotion pattern are satisfied */
   private computeEmotionPatternActivation(agentId: string, signal: ImpulseSignal): number {
     const pattern = signal.emotionCondition;
@@ -1156,6 +1343,26 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       xml += `    沉默时长: ${idleMin}分钟\n`;
     }
     xml += '  </trigger_context>\n</internal_state>';
+
+    // V5: Inject behavioral envelope when state != 'normal'
+    const envelope = this.evaluateBehavioralState(agentId, agent);
+    if (envelope.state !== 'normal') {
+      const stateLabels: Record<BehavioralState, string> = {
+        clingy: '黏人', normal: '正常', hesitant: '犹豫', withdrawn: '退缩', cold_war: '冷战',
+      };
+      const patternInstructions: Record<MessagePattern, string> = {
+        single: '用一条完整消息表达。',
+        burst: '把想法拆成2-3条短消息发出来，像在聊天一样自然断句。每条不超过30字。',
+        fragmented: '把想法拆成2-4条碎片化消息，像在边想边说。每条不超过30字。',
+        minimal: '用最少的字回复，1-3个字即可。',
+      };
+      xml += `\n<behavioral_envelope>\n  当前状态: ${stateLabels[envelope.state]}`;
+      xml += `\n  表达方式: ${patternInstructions[envelope.messagePattern]}`;
+      if (envelope.emotionalTone) xml += `\n  情绪基调: ${envelope.emotionalTone}`;
+      if (envelope.suppressFollowUp) xml += `\n  约束: 不要追问，等对方回复。`;
+      xml += '\n</behavioral_envelope>';
+    }
+
     return xml;
   }
 
@@ -1165,11 +1372,18 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
 
     const internalState = this.formatInternalState(agentId, agent, state);
     const promptTemplate = agent.card.proactive?.impulse?.promptTemplate ?? '基于当前内心状态，自然地主动发一条消息。';
-    const prompt = `${promptTemplate}\n\n${internalState}\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
+
+    // V5: Compute envelope and modify prompt
+    const envelope = this.evaluateBehavioralState(agentId, agent);
+    let prompt = `${promptTemplate}\n\n${internalState}`;
+    if (envelope.messagePattern !== 'single' && envelope.messagePattern !== 'minimal') {
+      prompt += `\n\n请以[MSG]...[/MSG]标签格式输出${envelope.maxMessages}条消息。每条消息独立成句。`;
+    }
+    prompt += `\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
 
     const triggerType = this.determineTriggerType(agentId, agent.card.proactive!.impulse!);
     const events = state.activeEvents.map(e => e.name).join(', ') || '内心积累';
-    console.log(`[Impulse] Firing for ${agent.name} (impulse=${state.value.toFixed(3)}, type=${triggerType}, events=[${events}])`);
+    console.log(`[Impulse] Firing for ${agent.name} (impulse=${state.value.toFixed(3)}, type=${triggerType}, events=[${events}], state=${envelope.state})`);
 
     try {
       const content = await this.generateFn(agentId, prompt);
@@ -1178,21 +1392,33 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       // V3: dedup check
       if (await this.isDuplicate(agentId, content)) return;
 
-      const id = `impulse-${agentId}-${this.now()}`;
-      this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, content);
-      this.notifyMessage(agentId, id, 'impulse', triggerType, content);
+      // V5: Parse into MessagePlan and store each message
+      const plan = this.parseMessagePlan(content, envelope);
+      const firstId = `impulse-${agentId}-${this.now()}`;
+
+      for (let i = 0; i < plan.messages.length; i++) {
+        const msg = plan.messages[i];
+        const id = i === 0 ? firstId : `${firstId}-${i}`;
+        this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, msg.text);
+        this.notifyMessage(agentId, id, 'impulse', triggerType, msg.text, msg.delayMs);
+      }
 
       // V4: Self-action feedback — track awaiting response
       this.addActiveEvent(agentId, 'awaiting_response', 0.3, 0.3, 0.5);
       state.awaitingResponse = true;
-      state.awaitingMessageId = id;
+      state.awaitingMessageId = firstId;
 
       await this.audit.log({
         timestamp: this.nowDate(),
         actor: `agent:${agentId}`,
         action: 'proactive.impulse_fire',
-        target: id,
-        details: { impulse: state.value, triggerType, events: state.activeEvents.map(e => e.name), emotion: this.emotion.getState(agentId) },
+        target: firstId,
+        details: {
+          impulse: state.value, triggerType,
+          events: state.activeEvents.map(e => e.name),
+          emotion: this.emotion.getState(agentId),
+          envelope: { state: envelope.state, messagePattern: envelope.messagePattern, messageCount: plan.messages.length },
+        },
       });
     } catch (err) {
       console.error(`[Impulse] Failed to generate message:`, err);
@@ -1270,12 +1496,12 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
   }
 
   /** Notify callback about a newly generated message */
-  private notifyMessage(agentId: string, id: string, triggerId: string, triggerType: string, content: string): void {
+  private notifyMessage(agentId: string, id: string, triggerId: string, triggerType: string, content: string, delayMs = 0): void {
     if (!this.onMessageFn) return;
     try {
       this.onMessageFn(agentId, {
         id, agentId, triggerId, triggerType: triggerType as ProactiveTriggerType,
-        content, delivered: false, createdAt: this.nowDate(),
+        content, delivered: false, delayMs, createdAt: this.nowDate(),
       });
     } catch { /* don't let callback errors break the engine */ }
   }

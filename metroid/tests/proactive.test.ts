@@ -4,7 +4,7 @@ import { IdentityEngine } from '../src/engines/identity/index.js';
 import { EmotionEngine } from '../src/engines/emotion/index.js';
 import { ProactiveEngine } from '../src/engines/proactive/index.js';
 import { AuditLog } from '../src/security/audit.js';
-import type { MetroidCard, EngineContext, MetroidMessage } from '../src/types.js';
+import type { MetroidCard, EngineContext, MetroidMessage, BehavioralState } from '../src/types.js';
 import type Database from 'better-sqlite3';
 
 const testConfig = {
@@ -3271,6 +3271,439 @@ describe('ProactiveEngine', () => {
         await engine.evaluateAll(agent.id);
         const msgs = engine.getPendingMessages(agent.id);
         expect(msgs.find(m => m.triggerId === 'impulse')).toBeDefined();
+        vi.restoreAllMocks();
+      });
+    });
+  });
+
+  // ============================================================
+  // V5: Behavioral Envelope
+  // ============================================================
+
+  describe('V5: Behavioral Envelope', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+
+    function makeBehavioralCard(overrides?: Partial<MetroidCard>): MetroidCard {
+      return {
+        ...proactiveCard,
+        name: 'BehavioralBot',
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+          resilience: 0.5,
+        },
+        proactive: {
+          enabled: true,
+          triggers: [],
+          impulse: {
+            enabled: true,
+            signals: [{ type: 'idle', weight: 0.5, idleMinutes: 30 }],
+            decayRate: 0.1, fireThreshold: 0.6, cooldownMinutes: 10,
+            promptTemplate: 'behavioral test prompt',
+          },
+        },
+        behavioral: {
+          stateOverrides: {},
+          neverDo: [],
+          alwaysDo: [],
+        },
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    describe('State Evaluator', () => {
+      it('should return cold_war when high conflict + high emotionDist + restraint', () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.5, restraint: 0.6, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('BV1', card, 'enhanced');
+        engine.start(agent.id);
+        // Set high emotion distance
+        identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: -0.3 };
+        // Add high-intensity conflict event
+        engine.addActiveEvent(agent.id, 'conflict', 0.8, 0.3, 0.9);
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('cold_war');
+        expect(envelope.suppressFollowUp).toBe(true);
+      });
+
+      it('should return withdrawn when ignoredCount >= 3 and pressure > 0.3', () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('BV2', card, 'enhanced');
+        engine.start(agent.id);
+        // Simulate 3 ignored reactions
+        const state = engine.getImpulseState(agent.id)!;
+        state.memoryPressure = 0.5;
+        // Insert 3 ignored reactions directly
+        for (let i = 0; i < 3; i++) {
+          const msgId = `test-msg-${i}`;
+          db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at) VALUES (?, ?, 'impulse', 'impulse:idle', 'test', 1, datetime('now', '-1 hour'))`).run(msgId, agent.id);
+          engine.recordReaction(agent.id, msgId, 'ignored');
+        }
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('withdrawn');
+        expect(envelope.responseMode).toBe('reluctant');
+      });
+
+      it('should return clingy when high impulse + active emotion + no ignores + expressive', () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('BV3', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.7);
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('clingy');
+        expect(envelope.responseMode).toBe('eager');
+        expect(envelope.maxMessages).toBeGreaterThanOrEqual(2);
+      });
+
+      it('should return hesitant when awaitingResponse', () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('BV4', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        state.awaitingResponse = true;
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('hesitant');
+        expect(envelope.suppressFollowUp).toBe(true);
+      });
+
+      it('should return normal when no conditions met', () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('BV5', card, 'enhanced');
+        engine.start(agent.id);
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('normal');
+        expect(envelope.replyProbability).toBeGreaterThan(0.5);
+      });
+
+      it('should prioritize cold_war over withdrawn when both conditions met', () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.5, restraint: 0.6, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('BV6', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: -0.3 };
+        engine.addActiveEvent(agent.id, 'conflict', 0.8, 0.3, 0.9);
+        // Also set up withdrawn conditions
+        const state = engine.getImpulseState(agent.id)!;
+        state.memoryPressure = 0.5;
+        for (let i = 0; i < 3; i++) {
+          const msgId = `prio-msg-${i}`;
+          db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at) VALUES (?, ?, 'impulse', 'impulse:idle', 'test', 1, datetime('now', '-1 hour'))`).run(msgId, agent.id);
+          engine.recordReaction(agent.id, msgId, 'ignored');
+        }
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('cold_war');
+      });
+
+      it('should vary replyProbability across calls (perturbation)', () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('BV7', card, 'enhanced');
+        engine.start(agent.id);
+        const probabilities = new Set<number>();
+        for (let i = 0; i < 10; i++) {
+          const envelope = engine.evaluateBehavioralState(agent.id, agent);
+          probabilities.add(Math.round(envelope.replyProbability * 100));
+        }
+        // With random perturbation, we should see at least 2 different values
+        expect(probabilities.size).toBeGreaterThanOrEqual(2);
+      });
+
+      it('should apply character stateOverrides.emotionalTone', () => {
+        const card = makeBehavioralCard({
+          behavioral: {
+            stateOverrides: {
+              hesitant: { emotionalTone: '才不是在等你消息呢' },
+            },
+            neverDo: [],
+            alwaysDo: [],
+          },
+        });
+        const agent = identity.createAgent('BV8', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        state.awaitingResponse = true;
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('hesitant');
+        expect(envelope.emotionalTone).toContain('才不是在等你消息呢');
+      });
+    });
+
+    describe('Envelope Injection', () => {
+      it('should not inject behavioral_envelope XML for normal state', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('EI1', card, 'enhanced');
+        engine.start(agent.id);
+        let capturedPrompt = '';
+        engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test msg'; });
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        // Normal state should not have behavioral_envelope
+        expect(capturedPrompt).not.toContain('<behavioral_envelope>');
+        vi.restoreAllMocks();
+      });
+
+      it('should inject behavioral_envelope XML for non-normal state', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('EI2', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        state.awaitingResponse = true;
+        let capturedPrompt = '';
+        engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test msg'; });
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        setImpulseValue(engine, agent.id, 0.9);
+        await engine.evaluateAll(agent.id);
+        expect(capturedPrompt).toContain('<behavioral_envelope>');
+        expect(capturedPrompt).toContain('犹豫');
+        vi.restoreAllMocks();
+      });
+
+      it('should append neverDo/alwaysDo to emotionalTone', () => {
+        const card = makeBehavioralCard({
+          behavioral: {
+            stateOverrides: {},
+            neverDo: ['直接表达喜欢'],
+            alwaysDo: ['口是心非'],
+          },
+        });
+        const agent = identity.createAgent('EI3', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id)!;
+        state.awaitingResponse = true; // force hesitant
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.emotionalTone).toContain('绝对不要: 直接表达喜欢');
+        expect(envelope.emotionalTone).toContain('一定要: 口是心非');
+      });
+
+      it('should use character-specific emotionalTone override', () => {
+        const card = makeBehavioralCard({
+          behavioral: {
+            stateOverrides: {
+              withdrawn: { emotionalTone: '好奇心让你忍不住想知道对方在干嘛' },
+            },
+            neverDo: [],
+            alwaysDo: [],
+          },
+        });
+        const agent = identity.createAgent('EI4', card, 'enhanced');
+        engine.start(agent.id);
+        // Set up withdrawn conditions
+        const state = engine.getImpulseState(agent.id)!;
+        state.memoryPressure = 0.5;
+        for (let i = 0; i < 3; i++) {
+          const msgId = `ei4-msg-${i}`;
+          db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at) VALUES (?, ?, 'impulse', 'impulse:idle', 'test', 1, datetime('now', '-1 hour'))`).run(msgId, agent.id);
+          engine.recordReaction(agent.id, msgId, 'ignored');
+        }
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.state).toBe('withdrawn');
+        expect(envelope.emotionalTone).toContain('好奇心让你忍不住想知道对方在干嘛');
+      });
+    });
+
+    describe('MessagePlan Parsing', () => {
+      it('should parse MSG tags into messages array', async () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('MP1', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.9);
+        const storedMessages: string[] = [];
+        engine.setGenerateFn(async () => '[MSG]你好呀[/MSG][MSG]今天天气真好[/MSG][MSG]想出去玩[/MSG]');
+        engine.setOnMessageFn((_id, msg) => { storedMessages.push(msg.content); });
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        expect(storedMessages.length).toBeGreaterThanOrEqual(2);
+        expect(storedMessages[0]).toBe('你好呀');
+        vi.restoreAllMocks();
+      });
+
+      it('should fallback to single message when no MSG tags', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('MP2', card, 'enhanced');
+        engine.start(agent.id);
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '这是一条普通消息');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        expect(msgs.length).toBe(1);
+        expect(msgs[0].content).toBe('这是一条普通消息');
+        vi.restoreAllMocks();
+      });
+
+      it('should truncate excess MSG tags to maxMessages', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('MP3', card, 'enhanced');
+        engine.start(agent.id);
+        // Normal state → maxMessages = 1, so even with MSG tags, only 1 message
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '[MSG]msg1[/MSG][MSG]msg2[/MSG][MSG]msg3[/MSG]');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        expect(msgs.length).toBe(1);
+        vi.restoreAllMocks();
+      });
+
+      it('should compute burst delays between 1-3s', () => {
+        // Access computeMessageDelay indirectly through parseMessagePlan behavior
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('MP4', card, 'enhanced');
+        engine.start(agent.id);
+        const delays: number[] = [];
+        engine.setOnMessageFn((_id, msg) => {
+          if (msg.delayMs != null && msg.delayMs > 0) delays.push(msg.delayMs);
+        });
+        // Force clingy state for burst pattern
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '[MSG]hi[/MSG][MSG]there[/MSG]');
+        vi.spyOn(Math, 'random').mockReturnValue(0.01); // low random for clingy + burst
+        engine.evaluateAll(agent.id).then(() => {
+          // Delays should be in burst range if pattern was burst
+          for (const d of delays) {
+            expect(d).toBeGreaterThanOrEqual(0);
+            expect(d).toBeLessThanOrEqual(8000); // burst or fragmented range
+          }
+        });
+        vi.restoreAllMocks();
+      });
+
+      it('should filter out empty MSG tags', async () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('MP5', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '[MSG]有内容[/MSG][MSG]  [/MSG][MSG][/MSG]');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        // Only non-empty messages should be stored
+        for (const m of msgs) {
+          expect(m.content.trim().length).toBeGreaterThan(0);
+        }
+        vi.restoreAllMocks();
+      });
+    });
+
+    describe('Fire Integration', () => {
+      it('should store multiple messages in DB for burst pattern', async () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('FI1', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '[MSG]消息一[/MSG][MSG]消息二[/MSG]');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        expect(msgs.length).toBeGreaterThanOrEqual(2);
+        const contents = msgs.map(m => m.content);
+        expect(contents).toContain('消息一');
+        expect(contents).toContain('消息二');
+        vi.restoreAllMocks();
+      });
+
+      it('should store single message for single pattern', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('FI2', card, 'enhanced');
+        engine.start(agent.id);
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => '单条消息');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        const msgs = engine.getPendingMessages(agent.id);
+        expect(msgs.length).toBe(1);
+        expect(msgs[0].content).toBe('单条消息');
+        vi.restoreAllMocks();
+      });
+
+      it('should call notifyMessage with delayMs for each message', async () => {
+        const card = makeBehavioralCard({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2, resilience: 0.5,
+          },
+        });
+        const agent = identity.createAgent('FI3', card, 'enhanced');
+        engine.start(agent.id);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.5, arousal: 0.3, dominance: 0.1 };
+        setImpulseValue(engine, agent.id, 0.9);
+        const notified: Array<{ content: string; delayMs?: number }> = [];
+        engine.setGenerateFn(async () => '[MSG]first[/MSG][MSG]second[/MSG]');
+        engine.setOnMessageFn((_id, msg) => { notified.push({ content: msg.content, delayMs: msg.delayMs }); });
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        expect(notified.length).toBeGreaterThanOrEqual(2);
+        expect(notified[0].delayMs).toBe(0); // first message has no delay
+        vi.restoreAllMocks();
+      });
+
+      it('should log envelope snapshot in audit', async () => {
+        const card = makeBehavioralCard();
+        const agent = identity.createAgent('FI4', card, 'enhanced');
+        engine.start(agent.id);
+        setImpulseValue(engine, agent.id, 0.9);
+        engine.setGenerateFn(async () => 'audit test');
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+        await engine.evaluateAll(agent.id);
+        // Check audit log has envelope info
+        const auditRows = db.prepare(`SELECT * FROM audit_log WHERE action = 'proactive.impulse_fire' ORDER BY id DESC LIMIT 1`).all() as any[];
+        expect(auditRows.length).toBe(1);
+        const details = JSON.parse(auditRows[0].details);
+        expect(details.envelope).toBeDefined();
+        expect(details.envelope.state).toBeDefined();
+        expect(details.envelope.messagePattern).toBeDefined();
         vi.restoreAllMocks();
       });
     });

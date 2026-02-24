@@ -119,6 +119,38 @@ export interface MetroidCard {
     triggers: ProactiveTrigger[];
     impulse?: ImpulseConfig;
   };
+  behavioral?: {
+    stateOverrides?: Partial<Record<BehavioralState, {
+      emotionalTone?: string;
+      replyProbabilityMod?: number;   // -0.5 ~ +0.5
+      delayMod?: number;              // 0.5 ~ 3.0
+      preferredPattern?: MessagePattern;
+    }>>;
+    neverDo?: string[];
+    alwaysDo?: string[];
+  };
+}
+
+// === V5: Behavioral Envelope Types ===
+
+export type BehavioralState = 'clingy' | 'normal' | 'hesitant' | 'withdrawn' | 'cold_war';
+export type ResponseMode = 'eager' | 'normal' | 'reluctant' | 'silent';
+export type MessagePattern = 'single' | 'burst' | 'fragmented' | 'minimal';
+
+export interface BehavioralEnvelope {
+  state: BehavioralState;
+  responseMode: ResponseMode;
+  messagePattern: MessagePattern;
+  replyProbability: number;       // 0-1
+  delayRange: [number, number];   // [min, max] ms
+  maxMessages: number;            // 1-4
+  emotionalTone: string;          // natural language, injected into prompt
+  suppressFollowUp: boolean;
+}
+
+export interface MessagePlan {
+  messages: Array<{ text: string; delayMs: number }>;
+  envelope: BehavioralEnvelope;
 }
 
 // === Proactive Types ===
@@ -152,6 +184,7 @@ export interface ProactiveMessage {
   content: string;
   delivered: boolean;
   deliveredAt?: Date;          // V3: when the message was delivered
+  delayMs?: number;            // V5: delay before delivering this message
   createdAt: Date;
 }
 
@@ -200,6 +233,12 @@ export interface ImpulseState {
   lastMemoryPressureTime: number; // V4: timestamp for pressure computation
   awaitingResponse: boolean;   // V4: waiting for user reply to proactive msg
   awaitingMessageId?: string;  // V4: the proactive message ID we're waiting on
+  inbox: Array<{               // V5: incoming messages pending scheduler
+    messageId: string;
+    content: string;
+    receivedAt: number;
+    processed: boolean;
+  }>;
 }
 
 export interface ActiveEvent {

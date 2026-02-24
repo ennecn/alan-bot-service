@@ -171,6 +171,12 @@ export function importSTCardFromPng(pngPath: string, userName = '用户'): STCar
         sparkResonanceThreshold: 0.4,
       },
     },
+    // V5: Behavioral envelope defaults
+    behavioral: {
+      stateOverrides: {},
+      neverDo: [],
+      alwaysDo: [],
+    },
   };
 
   // Extract linked world book name
@@ -246,6 +252,12 @@ export function importSTCardFromJson(jsonPath: string, userName = '用户'): STC
         sparkProbability: 0.08,
         sparkResonanceThreshold: 0.4,
       },
+    },
+    // V5: Behavioral envelope defaults
+    behavioral: {
+      stateOverrides: {},
+      neverDo: [],
+      alwaysDo: [],
     },
   };
 
