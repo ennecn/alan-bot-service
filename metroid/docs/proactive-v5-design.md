@@ -505,10 +505,12 @@ cd metroid && npx vitest run tests/proactive.test.ts
 
 ---
 
-## 未来方向 (V6)
+## 未来方向 (V6) — ✅ 已实现
 
-- **Phase B: inbox 解耦** — 被动回复也走 scheduler，实现真正的已读不回
-- **后台状态 LLM** — Haiku 级模型生成 internal_monologue 和 unsent_draft
-- **unsent_draft 记忆** — 想说没说的话存入记忆池，影响未来情绪
-- **多用户行为差异** — 对不同用户维护独立的 behavioral state
-```
+> V6 已在 `866f1d3` 中实现，详见 [proactive-v6-design.md](./proactive-v6-design.md)
+
+- ✅ **后台状态 LLM** — Haiku 级 analyzeFn 生成 inner monologue 和 unsent draft
+- ✅ **unsent_draft 记忆** — 想说没说的话存入 inner_monologues 表，注入 `<unsent_thoughts>` 影响未来回复
+- ✅ **多用户行为差异** — per-user relationship (attachment/trust/familiarity) 调制行为阈值
+- ✅ **对话节奏适配** — EMA 追踪用户回复速度，动态调整 agent 延迟
+- ⬜ **Phase B: inbox 解耦** — 被动回复也走 scheduler（待 V7）
