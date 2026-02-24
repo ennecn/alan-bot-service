@@ -481,6 +481,30 @@ cd metroid && npx vitest run tests/proactive.test.ts
 
 ---
 
+## 实现状态 (2026-02-24)
+
+**Phase A (V5.0) — 已完成 ✅**
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| 类型定义 (`types.ts`) | ✅ | BehavioralState/ResponseMode/MessagePattern/BehavioralEnvelope/MessagePlan, MetroidCard.behavioral, ImpulseState.inbox, ProactiveMessage.delayMs |
+| 状态评估器 (`proactive/index.ts`) | ✅ | `evaluateBehavioralState()` — 5种状态优先级判定 + 角色覆盖 + 随机扰动 |
+| 反馈计数 (`proactive/index.ts`) | ✅ | `getRecentReactionCount()` — 24h内特定反应类型计数 |
+| Envelope 注入 (`formatInternalState`) | ✅ | 非 normal 状态时追加 `<behavioral_envelope>` XML (~80 tokens) |
+| MessagePlan 解析 (`fireImpulse`) | ✅ | `[MSG]...[/MSG]` 标签解析, 空消息过滤, maxMessages 截断 |
+| 消息延迟 (`computeMessageDelay`) | ✅ | burst: 1-3s, fragmented: 3-8s |
+| 多消息存储 (`fireImpulse`) | ✅ | 每条消息独立存入 DB, notifyMessage 携带 delayMs |
+| Audit 日志 | ✅ | envelope snapshot (state, messagePattern, messageCount) 记入审计 |
+| ST 卡导入 (`st-card.ts`) | ✅ | PNG/JSON 两条路径均添加 behavioral 默认值 |
+| 测试 (`proactive.test.ts`) | ✅ | 21 个新测试 (8 状态评估 + 4 注入 + 5 解析 + 4 集成), 全部 191 测试通过 |
+
+**Phase B (V5.1) — 未开始**
+
+- inbox 解耦: 被动回复走 scheduler
+- 需要 OpenClaw adapter 层支持异步推送
+
+---
+
 ## 未来方向 (V6)
 
 - **Phase B: inbox 解耦** — 被动回复也走 scheduler，实现真正的已读不回
