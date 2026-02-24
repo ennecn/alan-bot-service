@@ -29,6 +29,12 @@ export interface ChatResult {
   usage?: LLMUsage;
   voiceHint?: { emotion: string; intensity: number; speed: number };
   fragmentSummary: Array<{ source: string; tokens: number }>;
+  // V7: Inbox decoupling
+  delayed?: boolean;
+  delayMs?: number;
+  suppressed?: boolean;
+  suppressReason?: string;
+  envelope?: import('./types.js').BehavioralEnvelope;
 }
 
 export interface CompareResult {
@@ -79,7 +85,7 @@ export class Metroid {
     this.world = new WorldEngine(this.db);
     this.emotion = new EmotionEngine(this.db, this.identity, this.audit, this.config);
     this.growth = new GrowthEngine(this.db, this.identity, this.audit, this.config);
-    this.proactive = new ProactiveEngine(this.db, this.identity, this.emotion, this.audit, this.config);
+    this.proactive = new ProactiveEngine(this.db, this.identity, this.emotion, this.memory, this.audit, this.config);
     this.compiler = new PromptCompiler(this.config);
     this.compiler.registerEngine(this.identity);
     this.compiler.registerEngine(this.emotion);
@@ -156,6 +162,18 @@ export class Metroid {
     return this.world.search(keyword);
   }
 
+  /** V7 A3: Run side effects (engine learning) — can run even when response is suppressed */
+  private async runSideEffects(response: string, context: EngineContext): Promise<void> {
+    await this.compiler.onResponse(response, context);
+    await this.audit.log({
+      timestamp: new Date(),
+      actor: `agent:${context.agentId}`,
+      action: 'chat.response',
+      target: context.message.id,
+      details: { inputLength: context.message.content.length, outputLength: response.length },
+    });
+  }
+
   /** Process an incoming message and generate a response */
   async chat(
     agentId: string,
@@ -173,6 +191,33 @@ export class Metroid {
       conversationHistory: history,
       userName: message.author.name,
     };
+
+    // V7 A2: Evaluate behavioral envelope before LLM call
+    const userId = message.author.id;
+    let envelope: import('./types.js').BehavioralEnvelope | undefined;
+    if (agent && mode === 'enhanced') {
+      envelope = this.proactive.evaluateBehavioralState(agentId, agent, userId);
+
+      // Suppression check: cold_war/withdrawn may suppress reply
+      if ((envelope.state === 'cold_war' || envelope.state === 'withdrawn') && Math.random() > envelope.replyProbability) {
+        // Run side effects with empty response so engines still learn from user message
+        await this.runSideEffects('', context);
+        const t1 = performance.now();
+
+        // Generate suppressed reply monologue
+        this.proactive.generateSuppressedReply(agentId, userId, message.content, envelope).catch(() => {});
+
+        return {
+          response: '',
+          timing: { totalMs: Math.round(t1 - t0), compileMs: 0, llmMs: 0, postProcessMs: Math.round(t1 - t0) },
+          tokenUsage: { promptTokens: 0, completionTokens: 0 },
+          fragmentSummary: [],
+          suppressed: true,
+          suppressReason: envelope.state,
+          envelope,
+        };
+      }
+    }
 
     // Compile prompt — identity + memory + other engines contribute fragments
     const agentName = agent?.card.name ?? agent?.name ?? 'AI';
@@ -197,17 +242,8 @@ export class Metroid {
     const t3 = performance.now();
 
     // Post-processing: let engines learn from the exchange
-    await this.compiler.onResponse(responseText, context);
+    await this.runSideEffects(responseText, context);
     const t4 = performance.now();
-
-    // Audit
-    await this.audit.log({
-      timestamp: new Date(),
-      actor: `agent:${agentId}`,
-      action: 'chat.response',
-      target: message.id,
-      details: { inputLength: message.content.length, outputLength: responseText.length },
-    });
 
     // Build fragment summary (aggregate by source)
     const fragMap = new Map<string, number>();
@@ -215,6 +251,10 @@ export class Metroid {
       fragMap.set(f.source, (fragMap.get(f.source) || 0) + f.tokens);
     }
     const fragmentSummary = [...fragMap.entries()].map(([source, tokens]) => ({ source, tokens }));
+
+    // V7 A2: Compute delay for hesitant/withdrawn states
+    const delayed = envelope && (envelope.state === 'hesitant' || envelope.state === 'withdrawn') && envelope.delayRange[0] > 1000;
+    const delayMs = delayed ? Math.round(envelope!.delayRange[0] + Math.random() * (envelope!.delayRange[1] - envelope!.delayRange[0])) : undefined;
 
     return {
       response: responseText,
@@ -230,6 +270,9 @@ export class Metroid {
       },
       usage: llmResult.usage,
       fragmentSummary,
+      delayed: delayed || undefined,
+      delayMs,
+      envelope,
     };
   }
 

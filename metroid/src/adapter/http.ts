@@ -261,6 +261,23 @@ async function wsHandleMessage(client: WSClient, text: string): Promise<void> {
       });
 
       const impulse = metroid.getImpulseState(client.agentId);
+
+      // V7: Handle suppressed responses
+      if (result.suppressed) {
+        wsSend(client, {
+          type: 'read_receipt', messageId: userMsg.id,
+          envelope: result.envelope,
+          suppressReason: result.suppressReason,
+        });
+        return;
+      }
+
+      // V7: Handle delayed responses
+      if (result.delayed && result.delayMs) {
+        wsSend(client, { type: 'typing', delayMs: result.delayMs });
+        await new Promise(r => setTimeout(r, result.delayMs));
+      }
+
       wsSend(client, {
         type: 'chat_response', response: result.response, emotion, mode: agent.mode,
         growthChanges: growthChanges.length,
@@ -270,6 +287,8 @@ async function wsHandleMessage(client: WSClient, text: string): Promise<void> {
         tokenUsage: result.tokenUsage,
         fragmentSummary: result.fragmentSummary,
         impulse: impulse ? { value: impulse.value, activeEvents: impulse.activeEvents, suppressionCount: impulse.suppressionCount } : null,
+        envelope: result.envelope || undefined,
+        delayed: result.delayed || undefined,
       });
     } catch (err: any) {
       wsSend(client, { type: 'error', message: `chat failed: ${err.message}` });
@@ -620,6 +639,12 @@ route('POST', '/agents/:id/chat', async (req, res, { id }) => {
       usage: result.usage || null,
       voiceHint: result.voiceHint || null,
       fragmentSummary: result.fragmentSummary,
+      // V7: Inbox decoupling fields
+      delayed: result.delayed || undefined,
+      delayMs: result.delayMs || undefined,
+      suppressed: result.suppressed || undefined,
+      suppressReason: result.suppressReason || undefined,
+      envelope: result.envelope || undefined,
     });
   } catch (err: any) {
     error(res, `chat failed: ${err.message}`, 500);

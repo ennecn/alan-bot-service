@@ -290,17 +290,6 @@ export type MonologueTrigger =
   | 'event_detected'      // significant conversation event
   | 'ambient';            // low-frequency background thought
 
-export interface UnsentDraft {
-  id: string;
-  agentId: string;
-  userId: string;
-  content: string;         // what the agent wanted to say
-  reason: string;          // why it was suppressed (e.g., "cold_war", "hesitant")
-  behavioralState: BehavioralState;
-  createdAt: number;
-  consumedAt?: number;     // when it was used as context in a future message
-}
-
 // === Prompt Compiler Types ===
 
 export type STPosition = 'before_char' | 'after_char' | 'before_an' | 'after_an' | 'at_depth';

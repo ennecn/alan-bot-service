@@ -3,6 +3,7 @@ import type { MetroidConfig } from '../../config.js';
 import type { IdentityEngine } from '../identity/index.js';
 import type { EmotionEngine } from '../emotion/index.js';
 import type { AuditLog } from '../../security/audit.js';
+import type { MemoryEngine } from '../memory/index.js';
 import { EmbeddingService } from '../memory/embedding.js';
 import type {
   Engine, EngineContext, PromptFragment,
@@ -96,6 +97,7 @@ export class ProactiveEngine implements Engine {
     private db: Database.Database,
     private identity: IdentityEngine,
     private emotion: EmotionEngine,
+    private memory: MemoryEngine | null,
     private audit: AuditLog,
     private config: MetroidConfig,
   ) {
@@ -212,6 +214,8 @@ export class ProactiveEngine implements Engine {
       `),
       // V6: relationship
       getRelationship: this.db.prepare(`SELECT * FROM user_relationships WHERE agent_id = ? AND user_id = ?`),
+      // V7 C2: get all relationships for decay
+      getAllRelationships: this.db.prepare(`SELECT * FROM user_relationships WHERE agent_id = ?`),
       upsertRelationship: this.db.prepare(`
         INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity, last_interaction, updated_at)
         VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
@@ -227,6 +231,12 @@ export class ProactiveEngine implements Engine {
       `),
       getRecentMonologues: this.db.prepare(`
         SELECT * FROM inner_monologues WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?
+      `),
+      // V7 C5: recent non-suppressed monologues for LLM context
+      getRecentNonSuppressedMonologues: this.db.prepare(`
+        SELECT * FROM inner_monologues
+        WHERE agent_id = ? AND trigger != 'message_suppressed'
+        ORDER BY created_at DESC LIMIT ?
       `),
       getUnconsumedDrafts: this.db.prepare(`
         SELECT * FROM inner_monologues
@@ -274,6 +284,24 @@ export class ProactiveEngine implements Engine {
     return { agentId, userId, attachment: 0, trust: 0, familiarity: 0, lastInteraction: this.now(), updatedAt: this.now() };
   }
 
+  /** V7 C2: Decay relationships toward zero over time (24h grace, 0.5%/hour, familiarity never decays) */
+  decayRelationships(agentId: string): void {
+    const rows = this.stmts.getAllRelationships.all(agentId) as any[];
+    for (const row of rows) {
+      const lastInteraction = new Date(row.last_interaction).getTime();
+      const hoursSince = (this.now() - lastInteraction) / 3_600_000;
+      if (hoursSince <= 24) continue; // 24h grace period
+      const decayHours = hoursSince - 24;
+      const decayFactor = Math.pow(0.995, decayHours); // 0.5%/hour toward zero
+      const newAttachment = row.attachment * decayFactor;
+      const newTrust = row.trust * decayFactor;
+      // Only update if meaningful change (avoid DB churn)
+      if (Math.abs(newAttachment - row.attachment) > 0.001 || Math.abs(newTrust - row.trust) > 0.001) {
+        this.stmts.upsertRelationship.run(agentId, row.user_id, newAttachment, newTrust, row.familiarity);
+      }
+    }
+  }
+
   /** V6: Update relationship via LLM analysis */
   private async updateRelationshipViaLLM(agentId: string, userId: string, messageContent: string, agentResponse: string): Promise<void> {
     if (!this.analyzeFn) return;
@@ -293,6 +321,14 @@ export class ProactiveEngine implements Engine {
       const newTrust = clamp(current.trust + (parsed.trust_delta ?? 0) * volatility, -1, 1);
       const newFamiliarity = Math.min(1, current.familiarity + 0.01);
       this.stmts.upsertRelationship.run(agentId, userId, newAttachment, newTrust, newFamiliarity);
+
+      // V7 B3: Encode significant relationship changes as episodic memory
+      const totalDelta = Math.abs(parsed.attachment_delta ?? 0) + Math.abs(parsed.trust_delta ?? 0);
+      if (this.memory && totalDelta > 0.1) {
+        this.memory.encodeEvent(agentId,
+          `关系变化(${userId}): attachment ${current.attachment.toFixed(2)}→${newAttachment.toFixed(2)}, trust ${current.trust.toFixed(2)}→${newTrust.toFixed(2)}。原因: ${parsed.reason ?? ''}`,
+          `rel-${agentId}-${userId}-${this.now()}`);
+      }
     } catch (err) {
       console.error(`[V6] Failed to update relationship via LLM:`, err);
     }
@@ -321,6 +357,12 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
       if (this.onMonologueFn) {
         try { this.onMonologueFn(agentId, { id, trigger, content: content.trim(), createdAt: this.now() }); } catch { }
       }
+
+      // V7 B3: Encode state_change/event_detected monologues as semantic memory
+      if (this.memory && (trigger === 'state_change' || trigger === 'event_detected')) {
+        this.memory.encodeEvent(agentId, content.trim(), id);
+      }
+
       return content.trim();
     } catch (err) {
       console.error(`[V6] Failed to generate inner monologue:`, err);
@@ -331,6 +373,12 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
   /** V6: Get recent inner monologues */
   getRecentMonologues(agentId: string, limit = 10): any[] {
     return this.stmts.getRecentMonologues.all(agentId, limit) as any[];
+  }
+
+  /** V7 A4: Generate suppressed reply monologue (called from Metroid.chat() when response is suppressed) */
+  async generateSuppressedReply(agentId: string, userId: string, userMessage: string, envelope: BehavioralEnvelope): Promise<void> {
+    await this.generateInnerMonologue(agentId, userId, 'message_suppressed',
+      `收到"${userMessage.slice(0, 50)}"但选择不回复。状态: ${envelope.state}`);
   }
 
   /** Record user activity (called on each chat message) */
@@ -860,6 +908,9 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
 
     const state = this.impulseStates.get(agentId);
     if (!state) return;
+
+    // V7 C2: Decay relationships each tick
+    this.decayRelationships(agentId);
 
     const now = this.now();
     const dtHours = (now - state.lastDecayTime) / 3_600_000;
@@ -1471,7 +1522,7 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
   }
 
   /** Format structured internal state XML for LLM prompt */
-  private formatInternalState(agentId: string, agent: AgentIdentity, state: ImpulseState): string {
+  private formatInternalState(agentId: string, agent: AgentIdentity, state: ImpulseState, userId?: string): string {
     const trajectory = this.computeTrajectory(agentId);
     const longTermMood = this.getLongTermMood(agentId);
     const lastActive = this.lastActivity.get(agentId) ?? this.now();
@@ -1540,12 +1591,21 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       xml += '\n</behavioral_envelope>';
     }
 
-    // V6: Inject unsent drafts (message_suppressed monologues)
-    // Use a default userId from the most recent inbox message if available
-    const draftUserId = state.inbox.find(m => !m.processed)?.messageId;
-    if (draftUserId || state.activeEvents.length > 0) {
-      // Try to find drafts for any user — use agentId-level query
-      const drafts = this.stmts.getUnconsumedDrafts.all(agentId, agentId) as any[];
+    // V7 C5: Inject recent non-suppressed monologues as context
+    const recentThoughts = this.stmts.getRecentNonSuppressedMonologues.all(agentId, 5) as any[];
+    if (recentThoughts.length > 0) {
+      xml += '\n<recent_thoughts>';
+      for (const t of recentThoughts) {
+        const agoMin = Math.round((this.now() - new Date(t.created_at).getTime()) / 60_000);
+        xml += `\n  [${t.trigger}, ${agoMin}分钟前] ${t.content}`;
+      }
+      xml += '\n</recent_thoughts>';
+    }
+
+    // V6→V7 C1: Inject unsent drafts (message_suppressed monologues)
+    // Fixed: pass actual userId instead of agentId twice
+    if (userId || state.activeEvents.length > 0) {
+      const drafts = this.stmts.getUnconsumedDrafts.all(agentId, userId ?? '') as any[];
       if (drafts.length > 0) {
         xml += '\n<unsent_thoughts>';
         for (const d of drafts) {
@@ -1564,7 +1624,13 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
   private async fireImpulse(agentId: string, agent: AgentIdentity, state: ImpulseState): Promise<void> {
     if (!this.generateFn) return;
 
-    const internalState = this.formatInternalState(agentId, agent, state);
+    // V7 C1: Determine most recent userId for draft context
+    const relationships = this.stmts.getAllRelationships.all(agentId) as any[];
+    const mostRecentUser = relationships.sort((a: any, b: any) =>
+      new Date(b.last_interaction).getTime() - new Date(a.last_interaction).getTime()
+    )[0]?.user_id as string | undefined;
+
+    const internalState = this.formatInternalState(agentId, agent, state, mostRecentUser);
     const promptTemplate = agent.card.proactive?.impulse?.promptTemplate ?? '基于当前内心状态，自然地主动发一条消息。';
 
     // V5: Compute envelope and modify prompt (skip multi-message when envelope disabled)
@@ -1573,6 +1639,20 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     let prompt = `${promptTemplate}\n\n${internalState}`;
     if (envelopeActive && envelope.messagePattern !== 'single' && envelope.messagePattern !== 'minimal') {
       prompt += `\n\n请以[MSG]...[/MSG]标签格式输出${envelope.maxMessages}条消息。每条消息独立成句。`;
+    }
+    // V7 B3: Inject relevant memories into proactive prompt
+    if (this.memory) {
+      const keywords = state.activeEvents.map(e => e.name.replace('inspiration:', '')).join(' ');
+      if (keywords) {
+        try {
+          const memories = await this.memory.retrieveForContext(agentId, keywords, 3);
+          if (memories.length > 0) {
+            prompt += '\n<relevant_memories>\n' +
+              memories.map(m => `  ${m.summary || m.content.slice(0, 100)}`).join('\n') +
+              '\n</relevant_memories>';
+          }
+        } catch { /* memory retrieval failure is non-fatal */ }
+      }
     }
     prompt += `\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
 
@@ -1592,11 +1672,15 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       const plan = this.parseMessagePlan(content, envelopeActive ? envelope : normalEnvelope);
       const firstId = `impulse-${agentId}-${this.now()}`;
 
+      // V7 C4: Generate monologue to accompany proactive message
+      const monologue = await this.generateInnerMonologue(agentId, mostRecentUser,
+        'state_change', `主动发消息: "${content.slice(0, 50)}"`).catch(() => null);
+
       for (let i = 0; i < plan.messages.length; i++) {
         const msg = plan.messages[i];
         const id = i === 0 ? firstId : `${firstId}-${i}`;
         this.stmts.insertMessage.run(id, agentId, 'impulse', triggerType, msg.text);
-        this.notifyMessage(agentId, id, 'impulse', triggerType, msg.text, msg.delayMs);
+        this.notifyMessage(agentId, id, 'impulse', triggerType, msg.text, msg.delayMs, i === 0 ? monologue ?? undefined : undefined);
       }
 
       // V4: Self-action feedback — track awaiting response
@@ -1692,12 +1776,12 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
   }
 
   /** Notify callback about a newly generated message */
-  private notifyMessage(agentId: string, id: string, triggerId: string, triggerType: string, content: string, delayMs = 0): void {
+  private notifyMessage(agentId: string, id: string, triggerId: string, triggerType: string, content: string, delayMs = 0, monologue?: string): void {
     if (!this.onMessageFn) return;
     try {
       this.onMessageFn(agentId, {
         id, agentId, triggerId, triggerType: triggerType as ProactiveTriggerType,
-        content, delivered: false, delayMs, createdAt: this.nowDate(),
+        content, delivered: false, delayMs, monologue, createdAt: this.nowDate(),
       });
     } catch { /* don't let callback errors break the engine */ }
   }
@@ -1749,6 +1833,11 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
         .then(confirmedEvents => {
           for (const e of confirmedEvents) {
             this.addActiveEvent(context.agentId, e.name, e.intensity, 0.5, e.relevance);
+            // V7 C3: trigger event_detected monologue for high-confidence events
+            if (e.confidence >= 0.7) {
+              this.generateInnerMonologue(context.agentId, context.message.author.id,
+                'event_detected', `检测到事件: ${e.name}，强度${e.intensity.toFixed(1)}`).catch(() => {});
+            }
           }
         })
         .catch(() => {

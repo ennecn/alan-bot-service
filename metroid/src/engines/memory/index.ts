@@ -175,6 +175,17 @@ export class MemoryEngine implements Engine {
     return this.store.getRecentFiltered(agentId, limit, type, search);
   }
 
+  /** V7 B2: Retrieve memories for proactive context (no prompt fragment wrapping) */
+  async retrieveForContext(agentId: string, query: string, limit = 3): Promise<Memory[]> {
+    const results = await this.retriever.retrieve({ agentId, text: query, limit });
+    return results.map(r => r.memory);
+  }
+
+  /** V7 B2: Encode a relationship/monologue event as memory */
+  encodeEvent(agentId: string, content: string, sourceId: string): void {
+    this.encoder.encode(agentId, content, sourceId);
+  }
+
   /**
    * Format a retrieved memory for prompt injection.
    * Confidence level affects wording (from Lumi's feedback).
