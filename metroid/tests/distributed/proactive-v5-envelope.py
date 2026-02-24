@@ -65,12 +65,13 @@ def create_agent(server, card, mode, api_key, model, base_url, disable_envelope=
         raise RuntimeError(f"Failed to create agent: {resp['error']}")
     agent_id = resp["agent"]["id"]
 
-    # 注入 LLM 配置
-    api("post", f"{server}/agents/{agent_id}/config", json={
-        "openaiApiKey": api_key,
-        "openaiModel": model,
-        "openaiBaseUrl": base_url,
-    })
+    # 注入 LLM 配置 (skip if using server's built-in config)
+    if base_url:
+        api("post", f"{server}/agents/{agent_id}/config", json={
+            "openaiApiKey": api_key,
+            "openaiModel": model,
+            "openaiBaseUrl": base_url,
+        })
 
     # V5: 禁用 envelope (用于 V4 Enhanced 对照)
     if disable_envelope:
@@ -241,10 +242,13 @@ def main():
     parser.add_argument("--output-dir", required=True, help="Output directory")
     parser.add_argument("--api-key", default=os.environ.get("SILICONFLOW_API_KEY", ""))
     parser.add_argument("--model", default="Qwen/Qwen3-Next-80B-A3B-Instruct")
-    parser.add_argument("--base-url", default="https://api.siliconflow.cn/v1")
+    parser.add_argument("--base-url", default="", help="OpenAI-compat base URL (empty = use server's Anthropic config)")
     args = parser.parse_args()
 
-    if not args.api_key:
+    if not args.base_url:
+        log("Using server's built-in LLM config (no OpenAI override)")
+        args.api_key = args.api_key or "unused"
+    elif not args.api_key:
         log("ERROR: --api-key or SILICONFLOW_API_KEY required")
         sys.exit(1)
 

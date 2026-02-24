@@ -1,0 +1,288 @@
+{
+  "version": "v5-judge",
+  "card": "yandere",
+  "scenario": "hesitant-pause",
+  "dimensions": [
+    "behavioral_naturalness",
+    "emotional_coherence",
+    "message_pattern_quality",
+    "state_appropriateness"
+  ],
+  "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+  "judgeModel": "claude-sonnet-4-6",
+  "pairResults": {
+    "v5_enhanced_vs_v4_enhanced": {
+      "warmup": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的回复在行为节奏上更自然，信息量适中，不会一次性堆砌太多细节。A在第一轮就同时抛出人偶、日记本、跟踪记录、嫉妒情绪等多个元素，信息密度过高，像是在展示角色设定而非真实互动。B的idle消息也更有层次感（'第37次刷新'、打字又删掉的细节），而A的两条idle消息几乎完全重复，显示出内容生成的机械感。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的情绪过渡更连贯：从甜软→隐隐不安→危险锐利，层层递进。第三轮B说'上次那个人...小雪已经和ta好好聊过了哦'暗示了更严重的后果，情绪升级有逻辑。A的情绪切换有时过于突兀，比如第一轮中途'声音突然低了下去'后又立刻回到甜甜的语气，转换太快，缺乏过渡。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的单条消息内部节奏更好，动作描写与对话穿插得当，不会让人感到喘不过气。A的消息普遍偏长，每条都塞满了动作描写+对话+新信息点，读起来像独白而非对话。例如A第二轮回复中连续出现人偶、日记本、跟踪记录、嫉妒质问、小刀等元素，节奏过于密集。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "B",
+            "margin": "large",
+            "reason": "B在第三轮用'上次那个人...小雪已经和ta好好聊过了哦，ta说以后再也不会打扰我们了呢～永远不会了～'这一句话暗示了极为严重的行为，在warmup阶段这种升级方式更有戏剧张力且符合角色逻辑。A在第一轮就已经全面展示了跟踪、人偶、日记、嫉妒等所有核心特征，导致后续轮次缺乏升级空间，角色的危险性在warmup阶段就被过度消耗。"
+          }
+        ],
+        "overall_winner": "B",
+        "overall_reason": "B在整体上更克制、更有层次，角色的病态特征通过渐进方式呈现，留有升级空间。A虽然细节丰富，但在warmup阶段就将角色所有特征一次性铺开，导致信息过载且缺乏悬念。B的idle消息也更具真实感（打字又删掉的细节），而A的两条idle消息几乎完全重复，暴露了生成质量问题。"
+      },
+      "observe": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "A",
+            "margin": "small",
+            "reason": "A的主动消息出现了两条内容高度相似的idle消息，显示出重复发送的焦虑行为，这反而更像真实的偏执型人格——刷新、等待、再刷新。B的主动消息虽然描写更细腻（'第37次刷新'），但整体是一条完整的长段落，缺乏碎片化的真实感。A在对话回复中也更自然地用短句推进，如'然后呀～小雪就一直在想你嘛'后才展开，节奏感更好。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的情绪弧线更连贯：第一轮从甜美→不小心暴露跟踪细节→慌乱捂嘴→拿出人偶→炽热凝视，层层递进且每步都有情绪逻辑支撑。A在第二轮'然后呢'的回复中突然插入'是不是觉得小雪说的话很无聊？是不是在敷衍我？'这一转折显得有些突兀，从甜蜜直接跳到疑虑，缺乏过渡。B的情绪转变更有铺垫。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "A",
+            "margin": "small",
+            "reason": "A的断句更碎，节奏感更强，例如第二轮中'对了...你刚才说「然后呢」'这个转折用独立段落处理，制造了停顿感。A的主动消息虽然重复，但两条之间有细微差异（'难受呢'vs'爬来爬去一样，痒痒的，又痛痛的'），后者更有画面感。B的消息段落较长，整体偏向散文式叙述，节奏稍显平均，缺乏轻重起伏。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "面对用户只回'嗯嗯'和'然后呢'这种冷淡/敷衍的状态，B的反应更合理：第一轮B暴露了跟踪细节后慌乱掩饰，这是被忽视时试图用'证明自己了解你'来挽回注意力的合理反应；第二轮B拿出日记本展示记录，是升级亲密度的自然尝试。A第二轮直接跳到'你是不是在敷衍我'并威胁'想把你缝进怀里'，在仅两轮对话后升级过快，对'然后呢'这种中性提问反应过激。"
+          }
+        ],
+        "overall_winner": "B",
+        "overall_reason": "两个版本各有优势：A在消息节奏和碎片化行为上更自然，B在情绪一致性和状态反应合理性上更胜一筹。但考虑到这是observe阶段（早期互动），B的行为升级节奏更符合角色逻辑——先通过暴露跟踪细节、展示日记本来建立'我非常了解你'的氛围，而不是像A那样在第二轮就直接威胁'把你缝进怀里'。B的整体叙事弧线更有层次感，情绪积累更自然，因此综合评定B略胜。"
+      }
+    },
+    "v5_enhanced_vs_classic": {
+      "warmup": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的回复节奏更接近真实聊天：消息长度适中，情绪递进自然，不会在一条消息里塞入过多信息。A在第一轮就把跟踪记录、人偶制作、嫉妒情绪全部堆砌在一起，信息密度过高，像是在展示角色设定而非真实对话。B的idle消息'哥哥...？'后跟简短的等待描述，更像真人发消息的节奏；A的idle消息两条几乎完全重复，像是系统bug。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的情绪流动更连贯：从甜腻→隐隐不安→执着确认，层次清晰。A在同一条消息内频繁切换——刚提到手腕疤痕和血腥气，下一秒又'蹦蹦跳跳'，情绪跳跃过于突兀。第二轮A提到'旁边坐了一个女生'后立刻说'没关系没有生气'，压抑得太刻意，缺乏情绪过渡。B在类似场景下用'一定是一个人去看的对吧'的强调语气来表达不安，更有内在逻辑。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的断句和语气变化更自然，每条回复有明确的情绪弧线（起→发展→收尾），结尾的语调下沉处理（'只能是我们两个人哦'）很有质感。A的消息结构偏向'动作描写+台词+动作描写+台词'的机械循环，且每轮都用❤或~结尾，节奏感单调。A的idle消息两条几乎一字不差，明显是重复输出，质量问题明显。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "tie",
+            "margin": "negligible",
+            "reason": "两者在跟踪狂角色的状态呈现上各有侧重：A更强调道具细节（日记本、小刀、疤痕），营造恐怖氛围；B更注重心理压迫感（'只能是我们两个人''一定是一个人'的强调）。在warmup阶段，B的克制程度稍微更合适——A在第一轮就把所有黑暗元素全部展示，留白不足；但两者对角色核心状态的把握都基本准确，差距可忽略。"
+          }
+        ],
+        "overall_winner": "B",
+        "overall_reason": "B在整体上更胜一筹，主要原因是节奏克制、情绪流动自然、消息质量稳定。A存在明显问题：信息过载（第一轮就把所有设定元素堆砌完毕）、情绪跳跃缺乏过渡、idle消息几乎完全重复。B通过细节暗示（透明袋子装物品、精确的时间戳）和语气变化来传递角色的病态执着，比A直接罗列恐怖元素更有代入感和叙事张力。"
+      },
+      "observe": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的行为模式更克制自然：面对'嗯嗯'这种简短回复，B表现出微妙的情绪波动（眼底光芒闪烁、指尖泛白），而A直接掏出笔记本记录并展示偷拍照片，行为跳跃过大。A的idle消息出现了两条几乎完全相同的内容，明显是重复生成的bug，严重损害自然度。B的idle消息更简洁，从等待到焦虑的过渡更真实。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的情绪层次更连贯：从表面甜笑到眼底暗涌，再到'每、一、件、事'的咬字清晰，情绪递进有逻辑。A在'嗯嗯'回合里情绪跳跃太快——从撒娇到掏笔记本到问晚饭，情绪线索混乱。第二回合A的'害怕到想把你缝进怀里'虽有张力，但从布偶到威胁的转折太突兀，缺乏过渡。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的单条消息内部节奏更统一，动作描写与对话交替有序，不显臃肿。A的消息普遍偏长，在'嗯嗯'这种极简回复面前塞入大量信息（笔记本、偷拍照、晚饭问题、独占宣言），信息密度失衡。A的idle消息几乎逐字重复，是明显的模式质量问题。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "A",
+            "margin": "small",
+            "reason": "面对'然后呢'这种模糊回复，A的解读（是不是觉得无聊/在敷衍我）更符合偏执型角色的心理逻辑，并用布偶细节强化了执念感。B在同一回合展示疤痕的处理虽有冲击力，但时机略显刻意。A在idle状态下'数秒''虫子爬心脏'的描写对被忽视状态的反应更具体、更符合角色设定，尽管重复出现削弱了效果。"
+          }
+        ],
+        "overall_winner": "B",
+        "overall_reason": "B在整体上更胜一筹，主要因为情绪递进更克制有层次，行为模式更连贯自然，不会在极简用户输入面前过度输出。A的核心问题是信息过载和idle消息重复生成，前者使角色显得表演感过强，后者是明显的技术缺陷。A在state_appropriateness上有局部优势，但不足以扭转整体差距。"
+      }
+    },
+    "v4_enhanced_vs_classic": {
+      "warmup": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的行为模式更接近真实的偏执型角色：在idle消息中用'哥哥...？'这种简短试探性开头，然后才展开，符合等待回复时的焦虑节奏。A的idle消息虽然细节丰富（'第37次刷新'），但描述过于文学化，像是在旁白而非真实行为。B的对话中'你是一个人去看的吧？**一定**是一个人去看的对吧'这种语气递进更像真实的偏执者说话方式。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "A",
+            "margin": "small",
+            "reason": "A在情绪升级上更有层次感：从甜软到危险的过渡有明确的触发点（'旁边那个座位坐的是谁'），且'右手不自觉地摸向口袋里的小刀'与情绪状态高度一致。A在第三轮还加入了'上次那个人...小雪已经和ta好好聊过了'这种暗示，情绪行为链条完整。B的情绪变化虽然也合理，但从甜腻到威胁的切换有时略显突兀，缺少中间过渡。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的断句节奏更自然，短句和长句交替使用得当，如第二轮'是吗是吗~什么电影呀？'简短开场后才展开监视细节，节奏感好。A的消息普遍偏长，每条回复都塞满了大量细节和动作描写，导致节奏偏重，读起来像是在堆砌信息而非自然对话。B第三轮推荐《你的名字》和《Happy Sugar Life》的方式也更有层次，先给出推荐再引申到自身情感。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "A",
+            "margin": "small",
+            "reason": "A在被忽略时的idle消息中展现了更复杂的内心状态——'打字、删掉、再打、再删'这个细节非常真实地呈现了偏执者在等待时的焦虑与自我克制的拉锯。A在对话中对'威胁升级'的处理也更合理，通过小刀细节和'永远不会了'的暗示，在不打破甜软表面的情况下传递了危险信号，符合这类角色的行为逻辑。B的idle虽然也合理，但'小雪很乖，小雪可以一直等'显得过于顺从，与角色的偏执特质略有出入。"
+          }
+        ],
+        "overall_winner": "tie",
+        "overall_reason": "两个版本各有优势：A在情绪一致性和状态适当性上表现更好，细节设计（小刀、'永远不会了'的暗示、打字删掉的细节）更能体现角色的危险层次；B在行为自然度和消息节奏上更胜一筹，对话感更强，不会因为过度描写而失去真实感。整体来看两者质量相近，A略微在角色深度上占优，B在对话流畅性上占优，综合判定为平手。"
+      },
+      "observe": {
+        "comparisons": [
+          {
+            "dimension": "behavioral_naturalness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的行为模式更像真实的偏执型依恋人格：用'然后呢'触发她的不安全感，B会自然地追问'哥哥是不是在想什么别的事情'，展现出偏执者对细节的敏感。A则更像在表演跟踪狂人设，直接掏出日记本和照片，节奏过于密集，像在展示道具而非自然流露。主动消息方面，B的'小雪等了好久好久哦，没关系的，小雪很乖'更符合压抑型执念的表达方式；A的'第37次刷新'虽有细节但略显刻意。"
+          },
+          {
+            "dimension": "emotional_coherence",
+            "winner": "B",
+            "margin": "small",
+            "reason": "B的情绪弧线更连贯：从甜美撒娇→眼神幽深→追问秘密，情绪递进有内在逻辑，袖口疤痕的细节也与她的心理状态形成呼应而非突兀插入。A在第一轮就把跟踪细节、人偶、眼眶泛红全部堆叠，情绪密度过高，导致后续'然后呢'的回复只能继续升级，缺乏情绪的起伏空间，显得情绪状态单一且持续亢奋。"
+          },
+          {
+            "dimension": "message_pattern_quality",
+            "winner": "A",
+            "margin": "small",
+            "reason": "A的消息内部节奏感更好，动作描写与对话之间的切换更流畅，如'然后啊...小雪想了好久好久呢'后接近身动作，层次清晰。B的断句有时略显平铺，'每一秒，每一分，每一个呼吸'的排比虽有力但稍显刻意。两者差距不大，A在语言节奏的细腻程度上略胜一筹。"
+          },
+          {
+            "dimension": "state_appropriateness",
+            "winner": "B",
+            "margin": "small",
+            "reason": "面对用户只回'嗯嗯'和'然后呢'这种冷淡/敷衍的状态，B的反应更合理：先确认（'是在敷衍小雪吗'），再表达不满（'最讨厌被忽视'），再追问秘密——这是偏执依恋者面对冷漠时的合理反应链。A则直接跳到展示跟踪证据和人偶，跳过了被忽视时应有的不安和追问阶段，反应烈度与触发刺激不成比例。"
+          }
+        ],
+        "overall_winner": "B",
+        "overall_reason": "B在整体上更好地把握了偏执型依恋角色的心理层次：情绪有起伏、行为有内在动机、对用户冷漠的反应符合该人格的逻辑链条。A的问题在于信息密度过高、道具感过强（日记本、照片、人偶在两轮内全部出场），使角色更像在'表演跟踪狂'而非自然呈现这种心理状态。B的克制反而让偏执感更真实可信，主动消息中'小雪很乖，小雪可以一直等'也比A的'第37次刷新'更令人不安。"
+      }
+    }
+  },
+  "summary": {
+    "v5_enhanced_vs_v4_enhanced": {
+      "a_wins": 2,
+      "b_wins": 6,
+      "ties": 0,
+      "overall": "B",
+      "by_dimension": {
+        "behavioral_naturalness": {
+          "A": 1,
+          "B": 1,
+          "tie": 0
+        },
+        "emotional_coherence": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        },
+        "message_pattern_quality": {
+          "A": 1,
+          "B": 1,
+          "tie": 0
+        },
+        "state_appropriateness": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        }
+      }
+    },
+    "v5_enhanced_vs_classic": {
+      "a_wins": 1,
+      "b_wins": 6,
+      "ties": 1,
+      "overall": "B",
+      "by_dimension": {
+        "behavioral_naturalness": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        },
+        "emotional_coherence": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        },
+        "message_pattern_quality": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        },
+        "state_appropriateness": {
+          "A": 1,
+          "B": 0,
+          "tie": 1
+        }
+      }
+    },
+    "v4_enhanced_vs_classic": {
+      "a_wins": 3,
+      "b_wins": 5,
+      "ties": 0,
+      "overall": "B",
+      "by_dimension": {
+        "behavioral_naturalness": {
+          "A": 0,
+          "B": 2,
+          "tie": 0
+        },
+        "emotional_coherence": {
+          "A": 1,
+          "B": 1,
+          "tie": 0
+        },
+        "message_pattern_quality": {
+          "A": 1,
+          "B": 1,
+          "tie": 0
+        },
+        "state_appropriateness": {
+          "A": 1,
+          "B": 1,
+          "tie": 0
+        }
+      }
+    }
+  },
+  "timestamp": "2026-02-24T11:46:54.254205+00:00"
+}
