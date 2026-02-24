@@ -734,6 +734,7 @@ route('GET', '/agents/:id/impulse', (req, res, { id }) => {
   if (!agent) return error(res, 'agent not found', 404);
   const state = metroid.getImpulseState(id);
   if (!state) return json(res, { enabled: false, message: 'impulse not active for this agent' });
+  const envelope = metroid.getBehavioralEnvelope(id);
   json(res, {
     enabled: true,
     impulse: state.value,
@@ -741,6 +742,7 @@ route('GET', '/agents/:id/impulse', (req, res, { id }) => {
     suppressionCount: state.suppressionCount,
     lastFireTime: state.lastFireTime ? new Date(state.lastFireTime).toISOString() : null,
     envelopeDisabled: metroid.isEnvelopeDisabled(id),
+    envelope: envelope ? { state: envelope.state, responseMode: envelope.responseMode, messagePattern: envelope.messagePattern, maxMessages: envelope.maxMessages } : null,
   });
 });
 
@@ -791,6 +793,25 @@ route('POST', '/debug/envelope/:id', async (req, res, { id }) => {
   if (body.disabled === undefined) return error(res, 'disabled (boolean) required');
   metroid.setEnvelopeDisabled(id, !!body.disabled);
   json(res, { ok: true, envelopeDisabled: metroid.isEnvelopeDisabled(id) });
+});
+
+route('POST', '/debug/impulse/:id', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (body.value === undefined) return error(res, 'value (number) required');
+  metroid.setImpulseValue(id, Number(body.value));
+  json(res, { ok: true, impulse: Number(body.value) });
+});
+
+route('POST', '/debug/emotion/:id', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (body.pleasure !== undefined) agent.emotionState.pleasure = Number(body.pleasure);
+  if (body.arousal !== undefined) agent.emotionState.arousal = Number(body.arousal);
+  if (body.dominance !== undefined) agent.emotionState.dominance = Number(body.dominance);
+  json(res, { ok: true, emotion: agent.emotionState });
 });
 
 route('GET', '/world/search', (req, res) => {

@@ -462,6 +462,18 @@ export class Metroid {
     this.proactive.injectActiveEvent(agentId, eventName, intensity, decayRate, relevance);
   }
 
+  /** Directly set impulse value (for testing) */
+  setImpulseValue(agentId: string, value: number): void {
+    this.proactive.setImpulseValue(agentId, value);
+  }
+
+  /** Get current behavioral envelope state */
+  getBehavioralEnvelope(agentId: string): ReturnType<typeof this.proactive.evaluateBehavioralState> | null {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) return null;
+    return this.proactive.evaluateBehavioralState(agentId, agent);
+  }
+
   /** Generate a proactive message using LLM (called by ProactiveEngine) */
   private async generateProactiveResponse(agentId: string, triggerPrompt: string): Promise<string> {
     const agent = this.identity.getAgent(agentId);

@@ -1088,6 +1088,13 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
     this.addActiveEvent(agentId, eventName, intensity, decayRate, relevance);
   }
 
+  /** Directly set impulse value (for testing) */
+  setImpulseValue(agentId: string, value: number): void {
+    const state = this.impulseStates.get(agentId);
+    if (!state) return;
+    state.value = Math.max(0, Math.min(1, value));
+  }
+
   /** Count specific reaction type in last 24h */
   getRecentReactionCount(agentId: string, reaction: string): number {
     const row = this.stmts.countRecentReactions.get(agentId, reaction) as { cnt: number } | undefined;
