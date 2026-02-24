@@ -73,6 +73,9 @@ export class ProactiveEngine implements Engine {
   // === V5: Envelope disable flag (for A/B testing) ===
   private envelopeDisabled = new Set<string>(); // agentIds with envelope disabled
 
+  // === V9: Idle focus rotation counter ===
+  private idleCounter = new Map<string, number>();
+
   // === V6: Relationship & Inner Life ===
   private lastBehavioralState = new Map<string, BehavioralState>(); // agentId → last known state
   private tickCount = new Map<string, number>(); // agentId → tick counter for ambient monologue
@@ -372,6 +375,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
   /** Record user activity (called on each chat message) */
   recordActivity(agentId: string): void {
     this.lastActivity.set(agentId, this.now());
+    this.idleCounter.delete(agentId); // V9: reset focus rotation on user reply
   }
 
   /** Start background trigger evaluation for an agent */
@@ -443,7 +447,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         }
         if (targetEmb) {
           const sim = EmbeddingService.cosineSimilarity(contentEmb, targetEmb);
-          if (sim > 0.85) {
+          if (sim > 0.75) {
             console.log(`[Dedup] Skipping duplicate (cosine=${sim.toFixed(3)}) for ${agentId}`);
             return true;
           }
@@ -455,7 +459,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
     // Fallback: bigram Jaccard similarity
     for (const t of targets) {
       const sim = bigramJaccard(content, t.content);
-      if (sim > 0.7) {
+      if (sim > 0.55) {
         console.log(`[Dedup] Skipping duplicate (jaccard=${sim.toFixed(3)}) for ${agentId}`);
         return true;
       }
@@ -1202,7 +1206,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         replyProbability: 0.15 + resilience * 0.2,
         delayRange: [300_000, 1_800_000], // 5-30min
         maxMessages: 1,
-        emotionalTone: '你很生气/受伤，选择沉默。如果回复，用最少的字。',
+        emotionalTone: '心里不太舒服，不想多说。',
         suppressFollowUp: true,
       };
     }
@@ -1222,8 +1226,8 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         delayRange: [delayBase[0] * delayMul, delayBase[1] * delayMul],
         maxMessages: 1,
         emotionalTone: resilience > 0.5
-          ? '有点失落但还是想聊'
-          : '不太想说话，怕又被忽略',
+          ? '有点闷闷的'
+          : '心里有点空',
         suppressFollowUp: true,
       };
     }
@@ -1237,7 +1241,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         replyProbability: 1.0,
         delayRange: [0, 3000], // 0-3s
         maxMessages: 2 + Math.floor(expressiveness * 2), // 2-4
-        emotionalTone: '看到消息很开心，想分享很多事情。',
+        emotionalTone: '心情不错，有话想说。',
         suppressFollowUp: false,
       };
     }
@@ -1250,7 +1254,7 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         replyProbability: 0.8,
         delayRange: [30_000, 300_000], // 30s-5min
         maxMessages: 1,
-        emotionalTone: '想说但在犹豫要不要说',
+        emotionalTone: '有点犹豫',
         suppressFollowUp: true,
       };
     }
@@ -1328,6 +1332,20 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
         }))
         .filter(m => m.text.length > 0);
       if (messages.length > 0) return { messages, envelope };
+    }
+
+    // V9: Natural split for multi-message patterns (replaces [MSG] tag requirement)
+    if (envelope.messagePattern === 'burst' || envelope.messagePattern === 'fragmented') {
+      const segments = content.split(/\n{2,}/).filter(s => s.trim());
+      if (segments.length > 1) {
+        return {
+          messages: segments.slice(0, envelope.maxMessages).map((s, i) => ({
+            text: s.trim(),
+            delayMs: i === 0 ? 0 : this.computeMessageDelay(envelope.messagePattern),
+          })),
+          envelope,
+        };
+      }
     }
 
     // Fallback: treat entire content as single message
@@ -1565,25 +1583,26 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     if (idleMin > 0) {
       xml += `    沉默时长: ${idleMin}分钟\n`;
     }
-    xml += '  </trigger_context>\n</internal_state>';
+    xml += '  </trigger_context>\n';
 
-    // V5: Inject behavioral envelope when state != 'normal' (skip if disabled for A/B testing)
+    // V9: Pacing — reveal budget based on conversation depth
+    const recentDeliveredForPacing = this.stmts.getRecentDelivered.all(agentId) as any[];
+    const turnEstimate = recentDeliveredForPacing.length;
+    if (turnEstimate <= 2) {
+      xml += '  <pacing>早期互动，保持克制。每轮只暗示一个角色特征，不要一次性展示所有面。用细节暗示而非直白展示。</pacing>\n';
+    } else if (turnEstimate <= 5) {
+      xml += '  <pacing>可以逐步展示更多面，但仍保持节奏感。</pacing>\n';
+    }
+
+    xml += '</internal_state>';
+
+    // V9: Inject behavioral hint only for withdrawn/cold_war (skip clingy/hesitant — let LLM be free)
     const envelope = this.evaluateBehavioralState(agentId, agent);
-    if (envelope.state !== 'normal' && !this.envelopeDisabled.has(agentId)) {
-      const stateLabels: Record<BehavioralState, string> = {
-        clingy: '黏人', normal: '正常', hesitant: '犹豫', withdrawn: '退缩', cold_war: '冷战',
-      };
-      const patternInstructions: Record<MessagePattern, string> = {
-        single: '用一条完整消息表达。',
-        burst: '把想法拆成2-3条短消息发出来，像在聊天一样自然断句。每条不超过30字。',
-        fragmented: '把想法拆成2-4条碎片化消息，像在边想边说。每条不超过30字。',
-        minimal: '用最少的字回复，1-3个字即可。',
-      };
-      xml += `\n<behavioral_envelope>\n  当前状态: ${stateLabels[envelope.state]}`;
-      xml += `\n  表达方式: ${patternInstructions[envelope.messagePattern]}`;
-      if (envelope.emotionalTone) xml += `\n  情绪基调: ${envelope.emotionalTone}`;
-      if (envelope.suppressFollowUp) xml += `\n  约束: 不要追问，等对方回复。`;
-      xml += '\n</behavioral_envelope>';
+    if ((envelope.state === 'withdrawn' || envelope.state === 'cold_war') && !this.envelopeDisabled.has(agentId)) {
+      xml += '\n<behavioral_hint>';
+      if (envelope.emotionalTone) xml += `\n  ${envelope.emotionalTone}`;
+      if (envelope.suppressFollowUp) xml += '\n  不用追问，等对方就好。';
+      xml += '\n</behavioral_hint>';
     }
 
     // V6: Inject unsent drafts (message_suppressed monologues)
@@ -1617,9 +1636,30 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     const envelope = this.evaluateBehavioralState(agentId, agent);
     const envelopeActive = !this.envelopeDisabled.has(agentId);
     let prompt = `${promptTemplate}\n\n${internalState}`;
-    if (envelopeActive && envelope.messagePattern !== 'single' && envelope.messagePattern !== 'minimal') {
-      prompt += `\n\n请以[MSG]...[/MSG]标签格式输出${envelope.maxMessages}条消息。每条消息独立成句。`;
+
+    // V9: Inject recent delivered messages for dedup awareness (change 1a)
+    const recentDelivered = this.stmts.getRecentDelivered.all(agentId) as any[];
+    if (recentDelivered.length > 0) {
+      prompt += '\n<already_sent>\n你最近已经发过这些消息，不要重复类似的内容、结构或意象：\n';
+      for (const msg of recentDelivered.slice(0, 5)) {
+        prompt += `  - "${msg.content.slice(0, 60)}"\n`;
+      }
+      prompt += '</already_sent>';
     }
+
+    // V9: Focus rotation — each idle gets a different creative focus (change 1b)
+    const count = this.idleCounter.get(agentId) ?? 0;
+    this.idleCounter.set(agentId, count + 1);
+    const focusPool = [
+      '聚焦等待行为（数秒、刷新、坐立不安等动作细节）',
+      '聚焦环境感知（窗外、房间、天气、声音、光线）',
+      '聚焦道具或物品（手边的东西、正在做的事）',
+      '聚焦内心独白（回忆、幻想、担忧、期待）',
+      '聚焦身体感受（心跳、呼吸、温度、触感）',
+    ];
+    prompt += `\n<focus_hint>本次消息焦点: ${focusPool[count % focusPool.length]}</focus_hint>`;
+
+    // V9: Removed [MSG]...[/MSG] format instruction — natural split in parseMessagePlan (change 2c)
     prompt += `\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
 
     const triggerType = this.determineTriggerType(agentId, agent.card.proactive!.impulse!);

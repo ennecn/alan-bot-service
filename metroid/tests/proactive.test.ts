@@ -3470,24 +3470,31 @@ describe('ProactiveEngine', () => {
         vi.spyOn(Math, 'random').mockReturnValue(0);
         setImpulseValue(engine, agent.id, 0.9);
         await engine.evaluateAll(agent.id);
-        // Normal state should not have behavioral_envelope
+        // Normal state should not have behavioral_hint
+        expect(capturedPrompt).not.toContain('<behavioral_hint>');
         expect(capturedPrompt).not.toContain('<behavioral_envelope>');
         vi.restoreAllMocks();
       });
 
-      it('should inject behavioral_envelope XML for non-normal state', async () => {
+      it('should inject behavioral_hint XML for withdrawn/cold_war state', async () => {
         const card = makeBehavioralCard();
         const agent = identity.createAgent('EI2', card, 'enhanced');
         engine.start(agent.id);
+        // Force withdrawn state: need ignoredCount >= 3 + memoryPressure > 0.3
         const state = engine.getImpulseState(agent.id)!;
-        state.awaitingResponse = true;
+        state.memoryPressure = 0.5;
+        for (let i = 0; i < 4; i++) {
+          const msgId = `ei2-msg-${i}`;
+          db.prepare(`INSERT INTO proactive_messages (id, agent_id, trigger_id, trigger_type, content, delivered, delivered_at) VALUES (?, ?, 'impulse', 'impulse:idle', 'test', 1, datetime('now', '-1 hour'))`).run(msgId, agent.id);
+          engine.recordReaction(agent.id, msgId, 'ignored');
+        }
         let capturedPrompt = '';
         engine.setGenerateFn(async (_id, prompt) => { capturedPrompt = prompt; return 'test msg'; });
         vi.spyOn(Math, 'random').mockReturnValue(0);
         setImpulseValue(engine, agent.id, 0.9);
         await engine.evaluateAll(agent.id);
-        expect(capturedPrompt).toContain('<behavioral_envelope>');
-        expect(capturedPrompt).toContain('犹豫');
+        expect(capturedPrompt).toContain('<behavioral_hint>');
+        expect(capturedPrompt).not.toContain('<behavioral_envelope>');
         vi.restoreAllMocks();
       });
 
