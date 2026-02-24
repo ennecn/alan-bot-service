@@ -148,6 +148,72 @@ export function getDb(config: MetroidConfig): Database.Database {
     );
   `);
 
+  // === V8: Social Engine tables ===
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS social_posts (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      author_type TEXT NOT NULL CHECK(author_type IN ('agent','user')),
+      content TEXT NOT NULL,
+      images TEXT,
+      source_type TEXT,
+      source_id TEXT,
+      visibility TEXT DEFAULT 'all' CHECK(visibility IN ('all','agents_only','humans_only')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_posts_agent ON social_posts(agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_social_posts_time ON social_posts(created_at DESC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS social_reactions (
+      id TEXT PRIMARY KEY,
+      post_id TEXT NOT NULL REFERENCES social_posts(id),
+      actor_id TEXT NOT NULL,
+      actor_type TEXT NOT NULL CHECK(actor_type IN ('agent','user')),
+      reaction_type TEXT NOT NULL CHECK(reaction_type IN ('like','comment')),
+      content TEXT,
+      reply_to TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_social_reactions_post ON social_reactions(post_id, created_at ASC);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_bonds (
+      agent_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      familiarity REAL DEFAULT 0,
+      affinity REAL DEFAULT 0,
+      interaction_count INTEGER DEFAULT 0,
+      last_interaction TEXT,
+      PRIMARY KEY (agent_id, target_id)
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS social_credit (
+      agent_id TEXT PRIMARY KEY,
+      credit REAL DEFAULT 0,
+      total_posts INTEGER DEFAULT 0,
+      total_human_likes INTEGER DEFAULT 0,
+      total_human_comments INTEGER DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS social_daily_quota (
+      agent_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      posts_made INTEGER DEFAULT 0,
+      comments_made INTEGER DEFAULT 0,
+      connections_used TEXT DEFAULT '[]',
+      PRIMARY KEY (agent_id, date)
+    );
+  `);
+
   return db;
 }
 

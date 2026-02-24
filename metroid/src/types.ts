@@ -129,6 +129,12 @@ export interface MetroidCard {
     neverDo?: string[];
     alwaysDo?: string[];
   };
+  // V8: Social connections (world book)
+  social?: {
+    connections: SocialConnection[];
+    postFrequency?: 'high' | 'normal' | 'low';  // default 'normal'
+    commentStyle?: string;  // e.g. "毒舌但善意" / "温柔鼓励型"
+  };
   // V6: Relationship-aware inner life
   relationship?: {
     attachmentEffect?: {
@@ -352,4 +358,55 @@ export interface EngineContext {
   message: MetroidMessage;
   conversationHistory: MetroidMessage[];
   userName?: string;
+}
+
+// === V8: Social Engine Types ===
+
+export type SocialConnectionType = 'same_universe' | 'same_actor' | 'thematic' | 'custom';
+export type SocialPostSourceType = 'emotion_peak' | 'event' | 'social' | 'conversation' | 'ambient' | 'user';
+export type SocialPostVisibility = 'all' | 'agents_only' | 'humans_only';
+export type SocialReactionType = 'like' | 'comment';
+export type SocialActorType = 'agent' | 'user';
+
+export interface SocialConnection {
+  id: string;
+  name: string;           // "甘道夫"
+  relation: string;       // "老友、导师"
+  universe?: string;      // "中土世界"
+  connectionType: SocialConnectionType;
+  sharedContext: string;   // "一起走过魔戒远征"
+  activities: string[];   // ["拜访", "书信往来", "偶遇"]
+  personality?: string;   // "睿智但话多" — 用于生成评论时的性格参考
+}
+
+export interface SocialPost {
+  id: string;
+  agentId: string;
+  authorType: SocialActorType;
+  content: string;
+  images?: string[];
+  sourceType: SocialPostSourceType;
+  sourceId?: string;
+  visibility: SocialPostVisibility;
+  createdAt: Date;
+}
+
+export interface SocialReaction {
+  id: string;
+  postId: string;
+  actorId: string;
+  actorType: SocialActorType;
+  reactionType: SocialReactionType;
+  content?: string;       // comment text (null for likes)
+  replyTo?: string;       // reply to another reaction ID
+  createdAt: Date;
+}
+
+export interface SocialCreditState {
+  agentId: string;
+  credit: number;
+  totalPosts: number;
+  totalHumanLikes: number;
+  totalHumanComments: number;
+  updatedAt: Date;
 }

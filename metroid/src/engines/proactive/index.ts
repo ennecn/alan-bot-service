@@ -260,6 +260,21 @@ export class ProactiveEngine implements Engine {
     this.onMonologueFn = fn;
   }
 
+  // V8: Social tick callback
+  private socialTickFn?: (agentId: string, behavioralState: BehavioralState, emotion: EmotionState) => Promise<void>;
+  // V8: Monologue → social post bridge
+  private onMonologueForSocialFn?: (agentId: string, content: string, trigger: string, monologueId: string, emotion?: EmotionState) => void;
+
+  /** V8: Set social tick callback (called from evaluateAll) */
+  setSocialTickFn(fn: (agentId: string, behavioralState: BehavioralState, emotion: EmotionState) => Promise<void>): void {
+    this.socialTickFn = fn;
+  }
+
+  /** V8: Set monologue→social post bridge callback */
+  setOnMonologueForSocialFn(fn: (agentId: string, content: string, trigger: string, monologueId: string, emotion?: EmotionState) => void): void {
+    this.onMonologueForSocialFn = fn;
+  }
+
   /** V6: Get per-user relationship state */
   getRelationship(agentId: string, userId: string): UserRelationship {
     const row = this.stmts.getRelationship.get(agentId, userId) as any;
@@ -272,6 +287,16 @@ export class ProactiveEngine implements Engine {
       };
     }
     return { agentId, userId, attachment: 0, trust: 0, familiarity: 0, lastInteraction: this.now(), updatedAt: this.now() };
+  }
+
+  /** Debug: Set relationship values directly (for deterministic testing) */
+  setRelationship(agentId: string, userId: string, values: Partial<Pick<UserRelationship, 'attachment' | 'trust' | 'familiarity'>>): UserRelationship {
+    const current = this.getRelationship(agentId, userId);
+    const attachment = values.attachment ?? current.attachment;
+    const trust = values.trust ?? current.trust;
+    const familiarity = values.familiarity ?? current.familiarity;
+    this.stmts.upsertRelationship.run(agentId, userId, attachment, trust, familiarity);
+    return this.getRelationship(agentId, userId);
   }
 
   /** V6: Update relationship via LLM analysis */
@@ -320,6 +345,17 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
 
       if (this.onMonologueFn) {
         try { this.onMonologueFn(agentId, { id, trigger, content: content.trim(), createdAt: this.now() }); } catch { }
+      }
+      // V8: Bridge monologue to social post (selective)
+      if (this.onMonologueForSocialFn && trigger !== 'message_suppressed' && trigger !== 'message_received') {
+        const emotionState = this.emotion.getState(agentId);
+        const isEmotionPeak = emotionState &&
+          (emotionState.pleasure > 0.7 || emotionState.pleasure < -0.5);
+        const isSignificantEvent = trigger === 'event_detected';
+        const isConversationAftermath = trigger === 'state_change';
+        if (isEmotionPeak || isSignificantEvent || isConversationAftermath) {
+          try { this.onMonologueForSocialFn(agentId, content.trim(), trigger, id, emotionState ?? undefined); } catch { }
+        }
       }
       return content.trim();
     } catch (err) {
@@ -754,6 +790,16 @@ ${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any
     const agent = this.identity.getAgent(agentId);
     if (agent?.card.proactive?.impulse?.enabled) {
       await this.evaluateImpulse(agentId, agent);
+    }
+    // V8: Social tick
+    if (this.socialTickFn && agent) {
+      try {
+        const envelope = this.evaluateBehavioralState(agentId, agent);
+        const emotionState = this.emotion.getState(agentId) ?? { pleasure: 0, arousal: 0, dominance: 0 };
+        await this.socialTickFn(agentId, envelope.state, emotionState);
+      } catch (err) {
+        console.error(`[V8] Social tick failed for ${agentId}:`, err);
+      }
     }
   }
 

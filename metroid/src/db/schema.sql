@@ -199,3 +199,75 @@ CREATE TABLE IF NOT EXISTS inner_monologues (
 );
 CREATE INDEX IF NOT EXISTS idx_monologues_agent
   ON inner_monologues(agent_id, created_at DESC);
+
+-- === Agent-to-Agent Relationships (Social Layer 0) ===
+CREATE TABLE IF NOT EXISTS relationships (
+  id TEXT PRIMARY KEY,
+  agent_a TEXT NOT NULL REFERENCES agents(id),
+  agent_b TEXT NOT NULL REFERENCES agents(id),
+  type TEXT NOT NULL DEFAULT 'acquaintance',
+  affinity REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  interaction_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- === V8: Social Posts (朋友圈) ===
+CREATE TABLE IF NOT EXISTS social_posts (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  author_type TEXT NOT NULL CHECK(author_type IN ('agent','user')),
+  content TEXT NOT NULL,
+  images TEXT,
+  source_type TEXT,
+  source_id TEXT,
+  visibility TEXT DEFAULT 'all' CHECK(visibility IN ('all','agents_only','humans_only')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_social_posts_agent ON social_posts(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_social_posts_time ON social_posts(created_at DESC);
+
+-- === V8: Social Reactions (likes + comments) ===
+CREATE TABLE IF NOT EXISTS social_reactions (
+  id TEXT PRIMARY KEY,
+  post_id TEXT NOT NULL REFERENCES social_posts(id),
+  actor_id TEXT NOT NULL,
+  actor_type TEXT NOT NULL CHECK(actor_type IN ('agent','user')),
+  reaction_type TEXT NOT NULL CHECK(reaction_type IN ('like','comment')),
+  content TEXT,
+  reply_to TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_social_reactions_post ON social_reactions(post_id, created_at ASC);
+
+-- === V8: Agent Bonds (world book connection tracking) ===
+CREATE TABLE IF NOT EXISTS agent_bonds (
+  agent_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  familiarity REAL DEFAULT 0,
+  affinity REAL DEFAULT 0,
+  interaction_count INTEGER DEFAULT 0,
+  last_interaction TEXT,
+  PRIMARY KEY (agent_id, target_id)
+);
+
+-- === V8: Social Credit ===
+CREATE TABLE IF NOT EXISTS social_credit (
+  agent_id TEXT PRIMARY KEY,
+  credit REAL DEFAULT 0,
+  total_posts INTEGER DEFAULT 0,
+  total_human_likes INTEGER DEFAULT 0,
+  total_human_comments INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- === V8: Daily Quota ===
+CREATE TABLE IF NOT EXISTS social_daily_quota (
+  agent_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  posts_made INTEGER DEFAULT 0,
+  comments_made INTEGER DEFAULT 0,
+  connections_used TEXT DEFAULT '[]',
+  PRIMARY KEY (agent_id, date)
+);

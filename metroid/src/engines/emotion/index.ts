@@ -304,4 +304,21 @@ ${snippet}
       'UPDATE agents SET emotion_state = ?, updated_at = datetime(?) WHERE id = ?'
     ).run(JSON.stringify(state), new Date().toISOString(), agentId);
   }
+
+  /** V8: External emotion nudge (from social events, etc.) */
+  nudge(agentId: string, delta: Partial<EmotionState>, source: string): void {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) return;
+
+    const intensityDial = agent.card.emotion?.intensityDial ?? 0.8;
+    const fullDelta: EmotionState = {
+      pleasure: delta.pleasure ?? 0,
+      arousal: delta.arousal ?? 0,
+      dominance: delta.dominance ?? 0,
+    };
+
+    const newState = this.applyDelta(agent.emotionState, fullDelta, intensityDial);
+    agent.emotionState = newState;
+    this.persistState(agentId, newState);
+  }
 }

@@ -7,8 +7,9 @@ import { WorldEngine } from './engines/world/index.js';
 import { EmotionEngine } from './engines/emotion/index.js';
 import { GrowthEngine } from './engines/growth/index.js';
 import { ProactiveEngine } from './engines/proactive/index.js';
+import { SocialEngine } from './engines/social/index.js';
 import { PromptCompiler } from './compiler/index.js';
-import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment } from './types.js';
+import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment, SocialPost, SocialReaction, SocialCreditState } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
 
 export interface LLMUsage {
@@ -66,6 +67,7 @@ export class Metroid {
   private emotion: EmotionEngine;
   private growth: GrowthEngine;
   private proactive: ProactiveEngine;
+  private social: SocialEngine;
   private compiler: PromptCompiler;
   private client: Anthropic;
   private config: MetroidConfig;
@@ -80,6 +82,7 @@ export class Metroid {
     this.emotion = new EmotionEngine(this.db, this.identity, this.audit, this.config);
     this.growth = new GrowthEngine(this.db, this.identity, this.audit, this.config);
     this.proactive = new ProactiveEngine(this.db, this.identity, this.emotion, this.audit, this.config);
+    this.social = new SocialEngine(this.db, this.identity, this.emotion, this.config);
     this.compiler = new PromptCompiler(this.config);
     this.compiler.registerEngine(this.identity);
     this.compiler.registerEngine(this.emotion);
@@ -87,6 +90,7 @@ export class Metroid {
     this.compiler.registerEngine(this.memory);
     this.compiler.registerEngine(this.growth);
     this.compiler.registerEngine(this.proactive);
+    this.compiler.registerEngine(this.social);
 
     // Wire up proactive message generation via LLM
     this.proactive.setGenerateFn((agentId, triggerPrompt) =>
@@ -101,6 +105,25 @@ export class Metroid {
       );
       return result.text;
     });
+
+    // V8: Wire social comment generation via LLM
+    this.social.setGenerateCommentFn(async (agentId, prompt) => {
+      const result = await this.callLLMWithFallback(
+        'You are a social media comment generator. Reply naturally, in character. No markdown.',
+        [{ role: 'user', content: prompt }],
+      );
+      return result.text;
+    });
+
+    // V8: Wire monologue → social post bridge
+    this.proactive.setOnMonologueForSocialFn((agentId, content, trigger, monologueId, emotion) => {
+      this.social.onMonologueForSocial(agentId, content, trigger, monologueId, emotion);
+    });
+
+    // V8: Wire social tick into ProactiveEngine
+    this.proactive.setSocialTickFn((agentId, behavioralState, emotion) =>
+      this.social.socialTick(agentId, behavioralState, emotion)
+    );
 
     this.client = new Anthropic({
       apiKey: this.config.llm.apiKey,
@@ -524,6 +547,11 @@ export class Metroid {
     return this.proactive.getRelationship(agentId, userId);
   }
 
+  /** Debug: Set relationship values directly */
+  setRelationship(agentId: string, userId: string, values: Parameters<typeof this.proactive.setRelationship>[2]) {
+    return this.proactive.setRelationship(agentId, userId, values);
+  }
+
   /** V6: Get recent inner monologues */
   getRecentMonologues(agentId: string, limit = 10) {
     return this.proactive.getRecentMonologues(agentId, limit);
@@ -534,6 +562,45 @@ export class Metroid {
     const agent = this.identity.getAgent(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
     return this.proactive.evaluateBehavioralState(agentId, agent, userId);
+  }
+
+  // === V8: Social API ===
+
+  /** Get mixed social feed */
+  getSocialFeed(limit = 20): SocialPost[] { return this.social.getFeed(limit); }
+
+  /** Get single agent's moments */
+  getAgentMoments(agentId: string, limit = 20): SocialPost[] { return this.social.getAgentFeed(agentId, limit); }
+
+  /** Human creates a post */
+  createHumanPost(userId: string, content: string): SocialPost | null {
+    return this.social.createPost(userId, content, 'user');
+  }
+
+  /** Add a reaction (like/comment) to a post */
+  addSocialReaction(postId: string, actorId: string, actorType: 'agent' | 'user', type: 'like' | 'comment', content?: string) {
+    return this.social.addReaction(postId, actorId, actorType, type, content);
+  }
+
+  /** Get socialCredit for an agent */
+  getSocialCredit(agentId: string): SocialCreditState { return this.social.getCredit(agentId); }
+
+  /** Get all reactions for a post */
+  getSocialReactions(postId: string): SocialReaction[] { return this.social.getPostReactions(postId); }
+
+  /** Register callback for new social posts (for WS push) */
+  onNewPost(cb: (agentId: string, post: SocialPost) => void): void { this.social.setOnPostFn(cb); }
+
+  /** Register callback for new social reactions (for WS push) */
+  onNewReaction(cb: (postId: string, reaction: SocialReaction) => void): void { this.social.setOnReactionFn(cb); }
+
+  /** Manually trigger social tick for an agent (debug) */
+  async triggerSocialTick(agentId: string): Promise<void> {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+    const envelope = this.proactive.evaluateBehavioralState(agentId, agent);
+    const emotion = this.emotion.getState(agentId) ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    await this.social.socialTick(agentId, envelope.state, emotion);
   }
 
   /** Inspect compiled prompt without calling LLM */
@@ -817,4 +884,6 @@ export type {
   MetroidMessage, PromptFragment, AuditEntry,
   ProactiveTrigger, ProactiveTriggerType, ProactiveMessage,
   Engine, EngineContext,
+  SocialPost, SocialReaction, SocialCreditState,
+  SocialConnection, SocialConnectionType, SocialPostSourceType,
 } from './types.js';
