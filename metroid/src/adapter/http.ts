@@ -17,6 +17,8 @@
  *   POST /debug/clock/advance          — advance debug clock { minutes }
  *   POST /debug/clock/reset            — reset debug clock to real time
  *   GET  /debug/clock                  — get current clock offset
+ *   POST /debug/inject-event/:id       — inject active event { event, intensity?, decayRate?, relevance? }
+ *   POST /debug/envelope/:id           — enable/disable V5 envelope { disabled: boolean }
  *   GET  /world/search?q=keyword    — search world entries
  *   POST /import/world              — import world book { path, charName?, userName? }
  *   GET  /health                    — health check
@@ -496,6 +498,11 @@ function init() {
       metroid.markProactiveDelivered(msg.id);
     }
   });
+
+  // V6: Push inner monologue events to WS clients
+  metroid.onMonologue((agentId, data) => {
+    wsBroadcast(agentId, { type: 'monologue', ...data });
+  });
 }
 
 // === Conversation Logging ===
@@ -699,6 +706,29 @@ route('POST', '/agents/:id/proactive/fire', async (req, res, { id }) => {
   }
 });
 
+// V6: Relationship & Inner Life endpoints
+route('GET', '/agents/:id/relationship/:userId', (req, res, { id, userId }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  json(res, metroid.getRelationship(id, userId));
+});
+
+route('GET', '/agents/:id/monologue', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+  const limit = parseInt(url.searchParams.get('limit') ?? '10', 10);
+  json(res, metroid.getRecentMonologues(id, limit));
+});
+
+route('GET', '/agents/:id/envelope', (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+  const userId = url.searchParams.get('userId') ?? undefined;
+  json(res, metroid.getBehavioralEnvelope(id, userId));
+});
+
 route('GET', '/agents/:id/impulse', (req, res, { id }) => {
   const agent = metroid.getAgent(id);
   if (!agent) return error(res, 'agent not found', 404);
@@ -710,6 +740,7 @@ route('GET', '/agents/:id/impulse', (req, res, { id }) => {
     activeEvents: state.activeEvents,
     suppressionCount: state.suppressionCount,
     lastFireTime: state.lastFireTime ? new Date(state.lastFireTime).toISOString() : null,
+    envelopeDisabled: metroid.isEnvelopeDisabled(id),
   });
 });
 
@@ -741,6 +772,25 @@ route('POST', '/debug/tick/:id', async (_req, res, { id }) => {
     impulse: impulse ? { value: impulse.value, events: impulse.activeEvents.length, suppressions: impulse.suppressionCount } : null,
     clockOffset: metroid.getTimeOffset(),
   });
+});
+
+route('POST', '/debug/inject-event/:id', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (!body.event) return error(res, 'event name required');
+  metroid.injectActiveEvent(id, body.event, body.intensity, body.decayRate, body.relevance);
+  const impulse = metroid.getImpulseState(id);
+  json(res, { ok: true, event: body.event, activeEvents: impulse?.activeEvents?.length ?? 0 });
+});
+
+route('POST', '/debug/envelope/:id', async (req, res, { id }) => {
+  const agent = metroid.getAgent(id);
+  if (!agent) return error(res, 'agent not found', 404);
+  const body = await readBody(req);
+  if (body.disabled === undefined) return error(res, 'disabled (boolean) required');
+  metroid.setEnvelopeDisabled(id, !!body.disabled);
+  json(res, { ok: true, envelopeDisabled: metroid.isEnvelopeDisabled(id) });
 });
 
 route('GET', '/world/search', (req, res) => {
@@ -792,6 +842,7 @@ route('POST', '/agents/:id/config', async (req, res, { id }) => {
   if (body.openaiApiKey !== undefined) { metroid.updateLLMConfig({ openaiApiKey: body.openaiApiKey }); applied.openaiApiKey = '***'; }
   if (body.rpMode && ['off', 'sfw', 'nsfw'].includes(body.rpMode)) { metroid.setRpMode(id, body.rpMode); applied.rpMode = body.rpMode; }
   if (body.mode && ['classic', 'enhanced'].includes(body.mode)) { metroid.setAgentMode(id, body.mode); applied.mode = body.mode; }
+  if (body.disableEnvelope !== undefined) { metroid.setEnvelopeDisabled(id, !!body.disableEnvelope); applied.disableEnvelope = !!body.disableEnvelope; }
   json(res, { ok: true, applied });
 });
 

@@ -448,6 +448,20 @@ export class Metroid {
     await this.proactive.evaluateAll(agentId);
   }
 
+  /** Disable/enable V5 behavioral envelope for an agent (for A/B testing) */
+  setEnvelopeDisabled(agentId: string, disabled: boolean): void {
+    this.proactive.setEnvelopeDisabled(agentId, disabled);
+  }
+
+  isEnvelopeDisabled(agentId: string): boolean {
+    return this.proactive.isEnvelopeDisabled(agentId);
+  }
+
+  /** Inject an active event directly into impulse system (for testing) */
+  injectActiveEvent(agentId: string, eventName: string, intensity?: number, decayRate?: number, relevance?: number): void {
+    this.proactive.injectActiveEvent(agentId, eventName, intensity, decayRate, relevance);
+  }
+
   /** Generate a proactive message using LLM (called by ProactiveEngine) */
   private async generateProactiveResponse(agentId: string, triggerPrompt: string): Promise<string> {
     const agent = this.identity.getAgent(agentId);
@@ -486,6 +500,28 @@ export class Metroid {
   /** Register callback for proactive message push (used by WS adapter) */
   onProactiveMessage(cb: (agentId: string, msg: ProactiveMessage) => void): void {
     this.proactive.setOnMessageFn(cb);
+  }
+
+  /** V6: Register callback for inner monologue push (used by WS adapter) */
+  onMonologue(cb: (agentId: string, data: { id: string; trigger: string; content: string; createdAt: number }) => void): void {
+    this.proactive.setOnMonologueFn(cb);
+  }
+
+  /** V6: Get per-user relationship state */
+  getRelationship(agentId: string, userId: string) {
+    return this.proactive.getRelationship(agentId, userId);
+  }
+
+  /** V6: Get recent inner monologues */
+  getRecentMonologues(agentId: string, limit = 10) {
+    return this.proactive.getRecentMonologues(agentId, limit);
+  }
+
+  /** V6: Get behavioral envelope for a user */
+  getBehavioralEnvelope(agentId: string, userId?: string) {
+    const agent = this.identity.getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
+    return this.proactive.evaluateBehavioralState(agentId, agent, userId);
   }
 
   /** Inspect compiled prompt without calling LLM */

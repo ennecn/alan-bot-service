@@ -129,6 +129,15 @@ export interface MetroidCard {
     neverDo?: string[];
     alwaysDo?: string[];
   };
+  // V6: Relationship-aware inner life
+  relationship?: {
+    attachmentEffect?: {
+      decayRateMultiplier?: number;     // how attachment affects event decay (default: 0.5 per +1 attachment)
+      thresholdShift?: number;          // how attachment shifts state thresholds (default: 0.1 per +1 attachment)
+      toleranceBonus?: number;          // extra ignores tolerated per +1 attachment (default: 2)
+    };
+    relationshipVolatility?: number;    // how quickly relationship values change (0=glacial, 1=volatile, default 0.3)
+  };
 }
 
 // === V5: Behavioral Envelope Types ===
@@ -185,6 +194,7 @@ export interface ProactiveMessage {
   delivered: boolean;
   deliveredAt?: Date;          // V3: when the message was delivered
   delayMs?: number;            // V5: delay before delivering this message
+  monologue?: string;          // V6: inner thought that accompanied this message
   createdAt: Date;
 }
 
@@ -239,6 +249,7 @@ export interface ImpulseState {
     receivedAt: number;
     processed: boolean;
   }>;
+  conversationTempo: number;   // V6: EMA of user reply speed in ms (0 = no data)
 }
 
 export interface ActiveEvent {
@@ -248,6 +259,46 @@ export interface ActiveEvent {
   confidence: number;          // 0-1, detection confidence (V3, default 1.0 for manual/regex)
   createdAt: number;           // timestamp
   decayRate: number;           // per-hour decay (default 0.5)
+}
+
+// === V6: Relationship & Inner Life Types ===
+
+export interface UserRelationship {
+  agentId: string;
+  userId: string;
+  attachment: number;      // -1 ~ +1, emotional bond strength
+  trust: number;           // -1 ~ +1, reliability/safety perception
+  familiarity: number;     // 0 ~ 1, how well agent knows this user
+  lastInteraction: number; // timestamp
+  updatedAt: number;       // timestamp
+}
+
+export interface InnerMonologue {
+  id: string;
+  agentId: string;
+  userId?: string;         // which user triggered this thought (null = ambient)
+  trigger: MonologueTrigger;
+  content: string;         // the inner thought (~20-50 tokens)
+  emotionSnapshot: EmotionState;
+  createdAt: number;
+}
+
+export type MonologueTrigger =
+  | 'state_change'        // behavioral state transition
+  | 'message_received'    // user sent a message
+  | 'message_suppressed'  // wanted to reply but didn't (unsent_draft)
+  | 'event_detected'      // significant conversation event
+  | 'ambient';            // low-frequency background thought
+
+export interface UnsentDraft {
+  id: string;
+  agentId: string;
+  userId: string;
+  content: string;         // what the agent wanted to say
+  reason: string;          // why it was suppressed (e.g., "cold_war", "hesitant")
+  behavioralState: BehavioralState;
+  createdAt: number;
+  consumedAt?: number;     // when it was used as context in a future message
 }
 
 // === Prompt Compiler Types ===

@@ -174,3 +174,28 @@ CREATE TABLE IF NOT EXISTS long_term_mood (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (agent_id, dimension)
 );
+
+-- === V6: User Relationships (per-user emotional bond) ===
+CREATE TABLE IF NOT EXISTS user_relationships (
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  user_id TEXT NOT NULL,
+  attachment REAL NOT NULL DEFAULT 0,
+  trust REAL NOT NULL DEFAULT 0,
+  familiarity REAL NOT NULL DEFAULT 0,
+  last_interaction TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (agent_id, user_id)
+);
+
+-- === V6: Inner Monologues (agent inner thoughts) ===
+CREATE TABLE IF NOT EXISTS inner_monologues (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  user_id TEXT,
+  trigger TEXT NOT NULL CHECK(trigger IN ('state_change','message_received','message_suppressed','event_detected','ambient')),
+  content TEXT NOT NULL,
+  emotion_snapshot TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_monologues_agent
+  ON inner_monologues(agent_id, created_at DESC);

@@ -177,6 +177,10 @@ export function importSTCardFromPng(pngPath: string, userName = '用户'): STCar
       neverDo: [],
       alwaysDo: [],
     },
+    // V6: Relationship defaults
+    relationship: {
+      relationshipVolatility: 0.3,
+    },
   };
 
   // Extract linked world book name
@@ -258,6 +262,10 @@ export function importSTCardFromJson(jsonPath: string, userName = '用户'): STC
       stateOverrides: {},
       neverDo: [],
       alwaysDo: [],
+    },
+    // V6: Relationship defaults
+    relationship: {
+      relationshipVolatility: 0.3,
     },
   };
 

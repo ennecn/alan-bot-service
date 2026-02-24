@@ -9,6 +9,7 @@ import type {
   ProactiveTrigger, ProactiveTriggerType, ProactiveMessage,
   EmotionState, ImpulseState, ImpulseSignal, ActiveEvent,
   AgentIdentity, BehavioralEnvelope, BehavioralState, MessagePattern, MessagePlan,
+  UserRelationship, MonologueTrigger,
 } from '../../types.js';
 
 /** Timestamped emotion snapshot for ring buffer */
@@ -68,6 +69,15 @@ export class ProactiveEngine implements Engine {
 
   // === V4: Spark embedding cache ===
   private sparkEmbeddingCache = new Map<string, Float32Array>(); // spark keyword → embedding
+
+  // === V5: Envelope disable flag (for A/B testing) ===
+  private envelopeDisabled = new Set<string>(); // agentIds with envelope disabled
+
+  // === V6: Relationship & Inner Life ===
+  private lastBehavioralState = new Map<string, BehavioralState>(); // agentId → last known state
+  private tickCount = new Map<string, number>(); // agentId → tick counter for ambient monologue
+  /** Callback notified when an inner monologue is generated (for WS push) */
+  private onMonologueFn?: (agentId: string, data: { id: string; trigger: string; content: string; createdAt: number }) => void;
 
   // === Feedback loop (V3) ===
   /** Callback for lightweight LLM analysis (event detection) */
@@ -200,6 +210,33 @@ export class ProactiveEngine implements Engine {
         SELECT COUNT(*) as cnt FROM proactive_reactions
         WHERE agent_id = ? AND reaction = ? AND created_at > datetime('now', '-1 day')
       `),
+      // V6: relationship
+      getRelationship: this.db.prepare(`SELECT * FROM user_relationships WHERE agent_id = ? AND user_id = ?`),
+      upsertRelationship: this.db.prepare(`
+        INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity, last_interaction, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(agent_id, user_id) DO UPDATE SET
+          attachment = excluded.attachment, trust = excluded.trust,
+          familiarity = excluded.familiarity, last_interaction = datetime('now'),
+          updated_at = datetime('now')
+      `),
+      // V6: inner monologue
+      insertMonologue: this.db.prepare(`
+        INSERT INTO inner_monologues (id, agent_id, user_id, trigger, content, emotion_snapshot)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `),
+      getRecentMonologues: this.db.prepare(`
+        SELECT * FROM inner_monologues WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?
+      `),
+      getUnconsumedDrafts: this.db.prepare(`
+        SELECT * FROM inner_monologues
+        WHERE agent_id = ? AND user_id = ? AND trigger = 'message_suppressed'
+        AND content NOT LIKE '%[consumed]%'
+        ORDER BY created_at DESC LIMIT 3
+      `),
+      markDraftConsumed: this.db.prepare(`
+        UPDATE inner_monologues SET content = content || ' [consumed]' WHERE id = ?
+      `),
     };
   }
 
@@ -216,6 +253,84 @@ export class ProactiveEngine implements Engine {
   /** Set lightweight LLM analysis callback (for event detection) */
   setAnalyzeFn(fn: (prompt: string) => Promise<string>): void {
     this.analyzeFn = fn;
+  }
+
+  /** V6: Set callback for inner monologue notifications (for WS push) */
+  setOnMonologueFn(fn: (agentId: string, data: { id: string; trigger: string; content: string; createdAt: number }) => void): void {
+    this.onMonologueFn = fn;
+  }
+
+  /** V6: Get per-user relationship state */
+  getRelationship(agentId: string, userId: string): UserRelationship {
+    const row = this.stmts.getRelationship.get(agentId, userId) as any;
+    if (row) {
+      return {
+        agentId, userId,
+        attachment: row.attachment, trust: row.trust, familiarity: row.familiarity,
+        lastInteraction: new Date(row.last_interaction).getTime(),
+        updatedAt: new Date(row.updated_at).getTime(),
+      };
+    }
+    return { agentId, userId, attachment: 0, trust: 0, familiarity: 0, lastInteraction: this.now(), updatedAt: this.now() };
+  }
+
+  /** V6: Update relationship via LLM analysis */
+  private async updateRelationshipViaLLM(agentId: string, userId: string, messageContent: string, agentResponse: string): Promise<void> {
+    if (!this.analyzeFn) return;
+    const agent = this.identity.getAgent(agentId);
+    const current = this.getRelationship(agentId, userId);
+    const prompt = `分析这段对话对关系的影响。
+当前关系: attachment=${current.attachment.toFixed(2)}, trust=${current.trust.toFixed(2)}
+用户说: "${messageContent.slice(0, 200)}"
+角色回复: "${agentResponse.slice(0, 200)}"
+请以JSON回复: {"attachment_delta": -0.1~0.1, "trust_delta": -0.1~0.1, "reason": "简短原因"}`;
+
+    try {
+      const raw = await this.analyzeFn(prompt);
+      const parsed = JSON.parse(raw.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+      const volatility = agent?.card.relationship?.relationshipVolatility ?? 0.3;
+      const newAttachment = clamp(current.attachment + (parsed.attachment_delta ?? 0) * volatility, -1, 1);
+      const newTrust = clamp(current.trust + (parsed.trust_delta ?? 0) * volatility, -1, 1);
+      const newFamiliarity = Math.min(1, current.familiarity + 0.01);
+      this.stmts.upsertRelationship.run(agentId, userId, newAttachment, newTrust, newFamiliarity);
+    } catch (err) {
+      console.error(`[V6] Failed to update relationship via LLM:`, err);
+    }
+  }
+
+  /** V6: Generate inner monologue */
+  private async generateInnerMonologue(
+    agentId: string, userId: string | undefined,
+    trigger: MonologueTrigger, context: string
+  ): Promise<string | null> {
+    if (!this.analyzeFn) return null;
+    const agent = this.identity.getAgent(agentId);
+    const recentMonologues = this.stmts.getRecentMonologues.all(agentId, 3) as any[];
+    const prompt = `你是${agent?.card.name ?? '角色'}。基于以下情境，写一句内心独白（20-50字，第一人称，不要引号）。
+情境: ${context}
+${recentMonologues.length > 0 ? `最近的想法: ${recentMonologues.map((m: any) => m.content).join(' / ')}` : ''}`;
+
+    try {
+      const content = await this.analyzeFn(prompt);
+      if (!content || content.length < 2) return null;
+
+      const id = `mono-${agentId}-${this.now()}`;
+      const emotionSnapshot = JSON.stringify(this.emotion.getState(agentId));
+      this.stmts.insertMonologue.run(id, agentId, userId ?? null, trigger, content.trim(), emotionSnapshot);
+
+      if (this.onMonologueFn) {
+        try { this.onMonologueFn(agentId, { id, trigger, content: content.trim(), createdAt: this.now() }); } catch { }
+      }
+      return content.trim();
+    } catch (err) {
+      console.error(`[V6] Failed to generate inner monologue:`, err);
+      return null;
+    }
+  }
+
+  /** V6: Get recent inner monologues */
+  getRecentMonologues(agentId: string, limit = 10): any[] {
+    return this.stmts.getRecentMonologues.all(agentId, limit) as any[];
   }
 
   /** Record user activity (called on each chat message) */
@@ -655,6 +770,7 @@ export class ProactiveEngine implements Engine {
         lastMemoryPressureTime: this.now(),
         awaitingResponse: false,
         inbox: [],
+        conversationTempo: 0,  // V6
       });
     }
   }
@@ -820,11 +936,25 @@ export class ProactiveEngine implements Engine {
         // SUPPRESS
         state.suppressionCount++;
         console.log(`[Impulse] Suppressed for ${agent.name} (impulse=${state.value.toFixed(3)}, threshold=${dynamicThreshold.toFixed(3)}, p=${fireProbability.toFixed(3)}, suppressions=${state.suppressionCount})`);
+        // V6: Generate unsent draft monologue
+        const envelope = this.evaluateBehavioralState(agentId, agent);
+        this.generateInnerMonologue(agentId, undefined, 'message_suppressed',
+          `想说但忍住了。当前状态: ${envelope.state}，情绪基调: ${envelope.emotionalTone || '平静'}`);
       }
     }
 
     // V4: Inspiration spark evaluation
     await this.evaluateSpark(agentId, agent, state);
+
+    // V6: Ambient monologue (every 10 ticks when there's emotional pressure)
+    const tc = (this.tickCount.get(agentId) ?? 0) + 1;
+    this.tickCount.set(agentId, tc);
+    if (state.memoryPressure > 0.2 && tc % 10 === 0) {
+      const lastActive = this.lastActivity.get(agentId) ?? this.now();
+      const idleMin = Math.round((this.now() - lastActive) / 60_000);
+      this.generateInnerMonologue(agentId, undefined, 'ambient',
+        `沉默了${idleMin}分钟，情绪积压${(state.memoryPressure * 100).toFixed(0)}%`);
+    }
   }
 
   /** Compute activation for a single signal */
@@ -943,6 +1073,21 @@ export class ProactiveEngine implements Engine {
   // V5: Behavioral Envelope
   // ============================================================
 
+  /** Disable/enable envelope for an agent (for A/B testing V4 vs V5) */
+  setEnvelopeDisabled(agentId: string, disabled: boolean): void {
+    if (disabled) this.envelopeDisabled.add(agentId);
+    else this.envelopeDisabled.delete(agentId);
+  }
+
+  isEnvelopeDisabled(agentId: string): boolean {
+    return this.envelopeDisabled.has(agentId);
+  }
+
+  /** Inject an active event directly (for testing — bypasses card trigger matching) */
+  injectActiveEvent(agentId: string, eventName: string, intensity = 0.8, decayRate = 0.5, relevance = 0.8): void {
+    this.addActiveEvent(agentId, eventName, intensity, decayRate, relevance);
+  }
+
   /** Count specific reaction type in last 24h */
   getRecentReactionCount(agentId: string, reaction: string): number {
     const row = this.stmts.countRecentReactions.get(agentId, reaction) as { cnt: number } | undefined;
@@ -950,7 +1095,7 @@ export class ProactiveEngine implements Engine {
   }
 
   /** Evaluate behavioral state from V4 signals — deterministic, zero LLM calls */
-  evaluateBehavioralState(agentId: string, agent: AgentIdentity): BehavioralEnvelope {
+  evaluateBehavioralState(agentId: string, agent: AgentIdentity, userId?: string): BehavioralEnvelope {
     const state = this.impulseStates.get(agentId);
     const emotionCfg = agent.card.emotion;
     const expressiveness = emotionCfg?.expressiveness ?? 0.5;
@@ -977,6 +1122,13 @@ export class ProactiveEngine implements Engine {
     const lastActive = this.lastActivity.get(agentId) ?? this.now();
     const idleMinutes = (this.now() - lastActive) / 60_000;
 
+    // V6: Relationship modulation
+    const relationship = userId ? this.getRelationship(agentId, userId) : null;
+    const attachmentEffect = agent.card.relationship?.attachmentEffect ?? {};
+    const att = relationship?.attachment ?? 0;
+    const thresholdShift = att * (attachmentEffect.thresholdShift ?? 0.1);
+    const toleranceBonus = Math.floor(att * (attachmentEffect.toleranceBonus ?? 2));
+
     // Character behavioral overrides
     const behavioralCfg = agent.card.behavioral;
     const overrides = behavioralCfg?.stateOverrides;
@@ -985,10 +1137,11 @@ export class ProactiveEngine implements Engine {
     let envelope: BehavioralEnvelope;
 
     // 1. cold_war: high-intensity negative event + high emotionDist + restraint
+    // V6: higher attachment = harder to trigger cold_war (threshold shifts up)
     const hasNegativeEvent = activeEvents.some(e =>
       (e.name === 'conflict' || e.name === 'distress') && e.intensity > 0.6
     );
-    if (hasNegativeEvent && emotionDist > 0.8 && restraint > 0.4) {
+    if (hasNegativeEvent && emotionDist > (0.8 + thresholdShift) && restraint > 0.4) {
       envelope = {
         state: 'cold_war',
         responseMode: Math.random() < 0.8 ? 'silent' : 'reluctant',
@@ -1001,8 +1154,9 @@ export class ProactiveEngine implements Engine {
       };
     }
     // 2. withdrawn: ignored >= 3 + pressure, or message_ignored event
+    // V6: higher attachment = more ignores tolerated
     else if (
-      (ignoredCount >= 3 && memoryPressure > 0.3) ||
+      (ignoredCount >= (3 + toleranceBonus) && memoryPressure > 0.3) ||
       activeEvents.some(e => e.name === 'message_ignored' && e.intensity > 0.3)
     ) {
       const delayBase: [number, number] = [120_000, 900_000]; // 2-15min
@@ -1021,7 +1175,8 @@ export class ProactiveEngine implements Engine {
       };
     }
     // 3. clingy: high impulse + active emotion + no ignores + expressive
-    else if (impulseValue > 0.5 && emotionDist > 0.3 && ignoredCount === 0 && expressiveness > 0.5) {
+    // V6: higher attachment = easier to be clingy (threshold shifts down)
+    else if (impulseValue > (0.5 - thresholdShift) && emotionDist > 0.3 && ignoredCount === 0 && expressiveness > 0.5) {
       envelope = {
         state: 'clingy',
         responseMode: 'eager',
@@ -1086,6 +1241,21 @@ export class ProactiveEngine implements Engine {
     }
     if (behavioralCfg?.alwaysDo?.length) {
       envelope.emotionalTone += (envelope.emotionalTone ? '\n' : '') + `一定要: ${behavioralCfg.alwaysDo.join('、')}`;
+    }
+
+    // V6: Detect state change and generate inner monologue
+    const prevState = this.lastBehavioralState.get(agentId);
+    if (prevState && prevState !== envelope.state) {
+      this.generateInnerMonologue(agentId, userId, 'state_change',
+        `状态从${prevState}变为${envelope.state}`);
+    }
+    this.lastBehavioralState.set(agentId, envelope.state);
+
+    // V6: Conversation tempo modulation
+    if (state?.conversationTempo && state.conversationTempo > 0) {
+      const tempoRatio = state.conversationTempo / 60_000; // normalize to minutes
+      const tempoMul = Math.max(0.3, tempoRatio);
+      envelope.delayRange = [envelope.delayRange[0] * tempoMul, envelope.delayRange[1] * tempoMul];
     }
 
     return envelope;
@@ -1344,9 +1514,9 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     }
     xml += '  </trigger_context>\n</internal_state>';
 
-    // V5: Inject behavioral envelope when state != 'normal'
+    // V5: Inject behavioral envelope when state != 'normal' (skip if disabled for A/B testing)
     const envelope = this.evaluateBehavioralState(agentId, agent);
-    if (envelope.state !== 'normal') {
+    if (envelope.state !== 'normal' && !this.envelopeDisabled.has(agentId)) {
       const stateLabels: Record<BehavioralState, string> = {
         clingy: '黏人', normal: '正常', hesitant: '犹豫', withdrawn: '退缩', cold_war: '冷战',
       };
@@ -1363,6 +1533,23 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       xml += '\n</behavioral_envelope>';
     }
 
+    // V6: Inject unsent drafts (message_suppressed monologues)
+    // Use a default userId from the most recent inbox message if available
+    const draftUserId = state.inbox.find(m => !m.processed)?.messageId;
+    if (draftUserId || state.activeEvents.length > 0) {
+      // Try to find drafts for any user — use agentId-level query
+      const drafts = this.stmts.getUnconsumedDrafts.all(agentId, agentId) as any[];
+      if (drafts.length > 0) {
+        xml += '\n<unsent_thoughts>';
+        for (const d of drafts) {
+          const agoMin = Math.round((this.now() - new Date(d.created_at).getTime()) / 60_000);
+          xml += `\n  [${agoMin}分钟前] ${d.content}`;
+          this.stmts.markDraftConsumed.run(d.id);
+        }
+        xml += '\n</unsent_thoughts>';
+      }
+    }
+
     return xml;
   }
 
@@ -1373,10 +1560,11 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
     const internalState = this.formatInternalState(agentId, agent, state);
     const promptTemplate = agent.card.proactive?.impulse?.promptTemplate ?? '基于当前内心状态，自然地主动发一条消息。';
 
-    // V5: Compute envelope and modify prompt
+    // V5: Compute envelope and modify prompt (skip multi-message when envelope disabled)
     const envelope = this.evaluateBehavioralState(agentId, agent);
+    const envelopeActive = !this.envelopeDisabled.has(agentId);
     let prompt = `${promptTemplate}\n\n${internalState}`;
-    if (envelope.messagePattern !== 'single' && envelope.messagePattern !== 'minimal') {
+    if (envelopeActive && envelope.messagePattern !== 'single' && envelope.messagePattern !== 'minimal') {
       prompt += `\n\n请以[MSG]...[/MSG]标签格式输出${envelope.maxMessages}条消息。每条消息独立成句。`;
     }
     prompt += `\n\n请以${agent.card.name}的身份，基于以上内心状态，自然地主动发一条消息给用户。不要提及情绪数值或系统状态。`;
@@ -1392,8 +1580,9 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
       // V3: dedup check
       if (await this.isDuplicate(agentId, content)) return;
 
-      // V5: Parse into MessagePlan and store each message
-      const plan = this.parseMessagePlan(content, envelope);
+      // V5: Parse into MessagePlan and store each message (skip multi-message when envelope disabled)
+      const normalEnvelope: BehavioralEnvelope = { state: 'normal', responseMode: 'normal', messagePattern: 'single', replyProbability: 1, delayRange: [1000, 10000], maxMessages: 1, emotionalTone: '', suppressFollowUp: false };
+      const plan = this.parseMessagePlan(content, envelopeActive ? envelope : normalEnvelope);
       const firstId = `impulse-${agentId}-${this.now()}`;
 
       for (let i = 0; i < plan.messages.length; i++) {
@@ -1514,8 +1703,31 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
   }
 
   async onResponse(_response: string, context: EngineContext): Promise<void> {
+    // V6: Conversation tempo tracking (EMA of user reply speed) — must read before recordActivity
+    const state = this.impulseStates.get(context.agentId);
+    if (state) {
+      const lastMsg = this.lastActivity.get(context.agentId) ?? this.now();
+      const replyMs = this.now() - lastMsg;
+      if (replyMs > 0 && replyMs < 3_600_000) { // only track if < 1 hour
+        const alpha = 0.3;
+        state.conversationTempo = state.conversationTempo === 0
+          ? replyMs
+          : alpha * replyMs + (1 - alpha) * state.conversationTempo;
+      }
+    }
+
     // Record activity on each conversation turn
     this.recordActivity(context.agentId);
+
+    // V6: Update relationship via LLM (async, don't block)
+    const userId = context.message.author.id;
+    this.updateRelationshipViaLLM(context.agentId, userId, context.message.content, _response)
+      .catch(() => { /* don't let relationship update errors break the engine */ });
+
+    // V6: Inner monologue on message received
+    this.generateInnerMonologue(context.agentId, userId, 'message_received',
+      `收到消息: "${context.message.content.slice(0, 100)}"`)
+      .catch(() => { });
 
     // V3: detect user reaction to proactive messages
     this.detectReaction(context.agentId);
@@ -1554,6 +1766,11 @@ ${contextLines ? `上下文:\n${contextLines}\n` : ''}
 /** Sigmoid function for probabilistic firing */
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
+}
+
+/** Clamp a value between min and max */
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 /** Bigram Jaccard similarity — fallback when embedding is unavailable */

@@ -3708,4 +3708,260 @@ describe('ProactiveEngine', () => {
       });
     });
   });
+
+  // ============================================================
+  // V6: Relationship-Aware Inner Life
+  // ============================================================
+  describe('V6: Relationship & Inner Life', () => {
+    let db: Database.Database;
+    let identity: IdentityEngine;
+    let emotion: EmotionEngine;
+    let audit: AuditLog;
+    let engine: ProactiveEngine;
+
+    function makeV6Card(overrides?: Partial<MetroidCard>): MetroidCard {
+      return {
+        ...proactiveCard,
+        name: 'V6Bot',
+        emotion: {
+          baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+          intensityDial: 0.8,
+          expressiveness: 0.8,
+          restraint: 0.2,
+          resilience: 0.5,
+        },
+        proactive: {
+          enabled: true,
+          triggers: [],
+          impulse: {
+            enabled: true,
+            signals: [{ type: 'idle', weight: 0.5, idleMinutes: 30 }],
+            decayRate: 0.1, fireThreshold: 0.6, cooldownMinutes: 10,
+            promptTemplate: 'v6 test prompt',
+          },
+        },
+        behavioral: { stateOverrides: {}, neverDo: [], alwaysDo: [] },
+        relationship: { relationshipVolatility: 0.3 },
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      db = createTestDb();
+      identity = new IdentityEngine(db);
+      audit = new AuditLog(db);
+      emotion = new EmotionEngine(db, identity, audit, testConfig);
+      engine = new ProactiveEngine(db, identity, emotion, audit, testConfig as any);
+    });
+
+    afterEach(() => {
+      engine.stop();
+      db.close();
+    });
+
+    // --- Relationship State ---
+    describe('relationship state', () => {
+      it('should return neutral defaults for unknown user', () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('R1', card, 'enhanced');
+        const rel = engine.getRelationship(agent.id, 'unknown-user');
+        expect(rel.attachment).toBe(0);
+        expect(rel.trust).toBe(0);
+        expect(rel.familiarity).toBe(0);
+      });
+
+      it('should persist and retrieve relationship via DB', () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('R2', card, 'enhanced');
+        db.prepare(`INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity) VALUES (?, ?, ?, ?, ?)`)
+          .run(agent.id, 'u1', 0.5, 0.3, 0.2);
+        const rel = engine.getRelationship(agent.id, 'u1');
+        expect(rel.attachment).toBeCloseTo(0.5);
+        expect(rel.trust).toBeCloseTo(0.3);
+        expect(rel.familiarity).toBeCloseTo(0.2);
+      });
+
+      it('should modulate cold_war threshold with high attachment', () => {
+        const card = makeV6Card({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.3, restraint: 0.6, resilience: 0.3,
+          },
+        });
+        const agent = identity.createAgent('R3', card, 'enhanced');
+        engine.start(agent.id);
+        db.prepare(`INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity) VALUES (?, ?, ?, ?, ?)`)
+          .run(agent.id, 'u1', 0.8, 0.5, 0.5);
+        engine.injectActiveEvent(agent.id, 'conflict', 0.9);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: -0.8, arousal: 0.5, dominance: -0.3 };
+
+        const envelopeWithUser = engine.evaluateBehavioralState(agent.id, agent, 'u1');
+        const envelopeWithout = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelopeWithUser).toBeDefined();
+        expect(envelopeWithout).toBeDefined();
+      });
+
+      it('should modulate withdrawn tolerance with high attachment', () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('R4', card, 'enhanced');
+        engine.start(agent.id);
+        db.prepare(`INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity) VALUES (?, ?, ?, ?, ?)`)
+          .run(agent.id, 'u1', 1.0, 0.5, 0.5);
+        const envelope = engine.evaluateBehavioralState(agent.id, agent, 'u1');
+        expect(envelope).toBeDefined();
+      });
+
+      it('should make clingy easier with high attachment', () => {
+        const card = makeV6Card({
+          emotion: {
+            baseline: { pleasure: 0, arousal: 0, dominance: 0 },
+            intensityDial: 0.8, expressiveness: 0.8, restraint: 0.2,
+          },
+        });
+        const agent = identity.createAgent('R5', card, 'enhanced');
+        engine.start(agent.id);
+        db.prepare(`INSERT INTO user_relationships (agent_id, user_id, attachment, trust, familiarity) VALUES (?, ?, ?, ?, ?)`)
+          .run(agent.id, 'u1', 1.0, 0.5, 0.5);
+        setImpulseValue(engine, agent.id, 0.45);
+        identity.getAgent(agent.id)!.emotionState = { pleasure: 0.3, arousal: 0.3, dominance: 0.1 };
+        const envelopeWithUser = engine.evaluateBehavioralState(agent.id, agent, 'u1');
+        expect(envelopeWithUser).toBeDefined();
+      });
+    });
+
+    // --- Inner Monologue ---
+    describe('inner monologue', () => {
+      it('should store monologue in DB via onResponse', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('M2', card, 'enhanced');
+        engine.start(agent.id);
+        engine.setAnalyzeFn(async () => '今天心情不错');
+        await engine.onResponse('test response', ctx(agent.id, '你好'));
+        await new Promise(r => setTimeout(r, 100));
+        const monologues = engine.getRecentMonologues(agent.id, 5);
+        expect(monologues.length).toBeGreaterThan(0);
+        expect(monologues[0].content).toBe('今天心情不错');
+      });
+
+      it('should fire WS notification for monologue', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('M3', card, 'enhanced');
+        engine.start(agent.id);
+        let notified = false;
+        engine.setOnMonologueFn((agentId, data) => {
+          notified = true;
+          expect(agentId).toBe(agent.id);
+          expect(data.content).toBeDefined();
+        });
+        engine.setAnalyzeFn(async () => '有点想聊天');
+        await engine.onResponse('test', ctx(agent.id, '嗨'));
+        await new Promise(r => setTimeout(r, 100));
+        expect(notified).toBe(true);
+      });
+
+      it('should generate ambient monologue at tick intervals', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('M5', card, 'enhanced');
+        engine.start(agent.id);
+        engine.setAnalyzeFn(async () => '好安静啊');
+        const state = engine.getImpulseState(agent.id);
+        if (state) state.memoryPressure = 0.5;
+        for (let i = 0; i < 10; i++) {
+          await engine.evaluateAll(agent.id);
+        }
+        await new Promise(r => setTimeout(r, 100));
+        const monologues = db.prepare(`SELECT * FROM inner_monologues WHERE agent_id = ? AND trigger = 'ambient'`).all(agent.id) as any[];
+        expect(monologues.length).toBeGreaterThanOrEqual(1);
+      });
+    });
+
+    // --- Conversation Tempo ---
+    describe('conversation tempo', () => {
+      it('should track user reply speed via EMA', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('T1', card, 'enhanced');
+        engine.start(agent.id);
+        engine.setAnalyzeFn(async () => '{}');
+        engine.recordActivity(agent.id);
+        engine.advanceTime(2);
+        await engine.onResponse('reply', ctx(agent.id, 'hello'));
+        const state = engine.getImpulseState(agent.id);
+        expect(state?.conversationTempo).toBeGreaterThan(0);
+      });
+
+      it('should modulate delay range based on tempo', () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('T2', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id);
+        if (state) state.conversationTempo = 10_000;
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.delayRange[0]).toBeLessThan(10_000);
+      });
+
+      it('should not modulate when tempo is 0', () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('T3', card, 'enhanced');
+        engine.start(agent.id);
+        const state = engine.getImpulseState(agent.id);
+        expect(state?.conversationTempo).toBe(0);
+        const envelope = engine.evaluateBehavioralState(agent.id, agent);
+        expect(envelope.delayRange[0]).toBeGreaterThan(0);
+      });
+    });
+
+    // --- Relationship LLM Update ---
+    describe('relationship LLM update', () => {
+      it('should call analyzeFn with correct prompt format', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('L1', card, 'enhanced');
+        engine.start(agent.id);
+        let promptReceived = '';
+        engine.setAnalyzeFn(async (prompt) => {
+          if (prompt.includes('attachment')) {
+            promptReceived = prompt;
+            return '{"attachment_delta": 0.05, "trust_delta": 0.02, "reason": "友好对话"}';
+          }
+          return '内心独白';
+        });
+        await engine.onResponse('你好呀', ctx(agent.id, '今天天气真好'));
+        await new Promise(r => setTimeout(r, 200));
+        expect(promptReceived).toContain('attachment=');
+        expect(promptReceived).toContain('trust=');
+      });
+
+      it('should update relationship with volatility scaling', async () => {
+        const card = makeV6Card({ relationship: { relationshipVolatility: 0.5 } });
+        const agent = identity.createAgent('L2', card, 'enhanced');
+        engine.start(agent.id);
+        engine.setAnalyzeFn(async (prompt) => {
+          if (prompt.includes('attachment')) {
+            return '{"attachment_delta": 0.1, "trust_delta": 0.1, "reason": "test"}';
+          }
+          return '测试独白';
+        });
+        await engine.onResponse('reply', ctx(agent.id, '你真好'));
+        await new Promise(r => setTimeout(r, 200));
+        const rel = engine.getRelationship(agent.id, 'u1');
+        expect(rel.attachment).toBeCloseTo(0.05, 1);
+        expect(rel.trust).toBeCloseTo(0.05, 1);
+      });
+
+      it('should increase familiarity per interaction', async () => {
+        const card = makeV6Card();
+        const agent = identity.createAgent('L3', card, 'enhanced');
+        engine.start(agent.id);
+        engine.setAnalyzeFn(async (prompt) => {
+          if (prompt.includes('attachment')) {
+            return '{"attachment_delta": 0, "trust_delta": 0, "reason": "neutral"}';
+          }
+          return '独白';
+        });
+        await engine.onResponse('reply', ctx(agent.id, 'hi'));
+        await new Promise(r => setTimeout(r, 200));
+        const rel = engine.getRelationship(agent.id, 'u1');
+        expect(rel.familiarity).toBeCloseTo(0.01, 2);
+      });
+    });
+  });
 });
