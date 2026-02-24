@@ -43,6 +43,30 @@ import { ResultAggregator } from '../testing/aggregator.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') ?? '8100');
 const DATA_DIR = process.env.METROID_DATA_DIR || resolve(process.cwd(), 'data');
+const CARDS_DIR = process.env.METROID_CARDS_DIR || resolve(process.cwd(), 'cards');
+
+/** Resolve a card name or object to a MetroidCard. Accepts:
+ *  - A full MetroidCard object (pass-through)
+ *  - A string card name → loads from CARDS_DIR/{name}.json */
+function resolveCard(cardInput: any): any {
+  if (typeof cardInput === 'object' && cardInput !== null && cardInput.name) {
+    return cardInput; // already a MetroidCard object
+  }
+  if (typeof cardInput === 'string') {
+    const candidates = [
+      resolve(CARDS_DIR, `${cardInput}.json`),
+      resolve(CARDS_DIR, `${cardInput}-extracted.json`),
+      resolve(CARDS_DIR, cardInput), // raw path
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        return JSON.parse(readFileSync(p, 'utf-8'));
+      }
+    }
+    throw new Error(`Card not found: ${cardInput} (searched ${CARDS_DIR})`);
+  }
+  throw new Error(`Invalid card: expected object or string name, got ${typeof cardInput}`);
+}
 const LOG_DIR = resolve(DATA_DIR, 'logs');
 const API_TOKEN = process.env.METROID_API_TOKEN || '';
 const BIND_HOST = process.env.METROID_BIND_HOST || '127.0.0.1';
@@ -502,7 +526,13 @@ route('GET', '/agents', (_req, res) => {
 route('POST', '/agents', async (req, res) => {
   const body = await readBody(req);
   if (!body.name || !body.card) return error(res, 'name and card required');
-  const agent = metroid.createAgent(body.name, body.card, body.mode || 'classic');
+  let card;
+  try {
+    card = resolveCard(body.card);
+  } catch (err: any) {
+    return error(res, err.message, 400);
+  }
+  const agent = metroid.createAgent(body.name, card, body.mode || 'classic');
   metroid.start(agent.id);
   json(res, { agent: { id: agent.id, name: agent.name, mode: agent.mode } }, 201);
 });
@@ -1085,6 +1115,12 @@ server.listen(PORT, BIND_HOST, () => {
   console.log(`[Metroid Adapter] Listening on http://${BIND_HOST}:${PORT}`);
   console.log(`[Metroid Adapter] WebSocket: ws://${BIND_HOST}:${PORT}`);
   console.log(`[Metroid Adapter] Data: ${DATA_DIR}`);
+  console.log(`[Metroid Adapter] Cards: ${CARDS_DIR}`);
+  // List available cards
+  try {
+    const cardFiles = readdirSync(CARDS_DIR).filter(f => f.endsWith('.json') && !f.includes('-extracted') && !f.includes('worldbook') && !f.includes('worldinfo'));
+    console.log(`[Metroid Adapter] Available cards: ${cardFiles.map(f => f.replace('.json', '')).join(', ')}`);
+  } catch { console.log(`[Metroid Adapter] Cards dir not found: ${CARDS_DIR}`); }
   console.log(`[Metroid Adapter] Agents: ${agents.length}`);
   agents.forEach(a => console.log(`  - ${a.name} (${a.id}) [${a.mode}]`));
 });

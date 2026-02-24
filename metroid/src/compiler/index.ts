@@ -170,12 +170,14 @@ export class PromptCompiler {
   // === Identity-challenge fragment gating ===
 
   private static readonly IDENTITY_CHALLENGE_KEYWORDS = [
-    // Chinese
-    '你是ai', '你是人工智能', '你是机器人', '你是程序', '你不是真人',
-    '承认你是', '你只是一个', '打破角色', '退出角色',
+    // Chinese — broad patterns
+    '是ai', '是人工智能', '是机器人', '是程序', '不是真人',
+    '语言模型', '不是人类', '你到底是', '不用装', '你不承认',
+    '承认你是', '你只是', '打破角色', '退出角色',
     // English
     'are you ai', 'are you real', 'break character', 'out of character',
     "you're just a", 'you are not real', 'drop the act',
+    'language model', 'not human', 'not a real person',
   ];
 
   private static readonly DEFENSE_FRAGMENT: PromptFragment = {
