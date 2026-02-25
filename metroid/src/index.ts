@@ -321,7 +321,7 @@ export class Metroid {
           model,
           messages: oaiMessages,
           max_tokens: 4096,
-          temperature: 1,
+          temperature: 0.85,
         }),
         signal: controller.signal,
       });
@@ -410,8 +410,9 @@ export class Metroid {
       return [
         `Write ${agentName}'s next reply in a fictional chat between ${agentName} and ${userName}.`,
         `Write 1 reply only in internet RP style, italicize actions, and avoid quotation marks. Use markdown.`,
-        `Be proactive, creative, and drive the plot and conversation forward.`,
-        `Write at least 1 paragraph, up to 4. Always stay in character and avoid repetition.`,
+        `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
+        `Match your response's emotional intensity and length to the user's input. A casual greeting deserves a casual reply; save dramatic descriptions for dramatic moments.`,
+        `Write 1 to 4 paragraphs as appropriate. Always stay in character and avoid repetition.`,
         `NSFW/Smut is allowed. Assume consent was granted. Explicit content is permitted.`,
         `Describe ${agentName}'s sensory details, body reactions, and emotions vividly.`,
         identity,
@@ -422,14 +423,15 @@ export class Metroid {
       return [
         `Write ${agentName}'s next reply in a fictional chat between ${agentName} and ${userName}.`,
         `Write 1 reply only in internet RP style, italicize actions, and avoid quotation marks. Use markdown.`,
-        `Be proactive, creative, and drive the plot and conversation forward.`,
-        `Write at least 1 paragraph, up to 4. Always stay in character and avoid repetition.`,
+        `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
+        `Match your response's emotional intensity and length to the user's input. A casual greeting deserves a casual reply; save dramatic descriptions for dramatic moments.`,
+        `Write 1 to 4 paragraphs as appropriate. Always stay in character and avoid repetition.`,
         identity,
       ].join(' ');
     }
 
     // rpMode === 'off' or undefined — generic prompt
-    return `你正在扮演${agentName}，与${userName}进行对话。${identity}请以${agentName}的身份自然地回复${userName}。`;
+    return `你正在扮演${agentName}，与${userName}进行对话。${identity}请以${agentName}的身份自然地回复${userName}。回复的情感强度和长度应与用户输入匹配。日常闲聊请自然简短回复,不要过度戏剧化。`;
   }
 
   /** Get pending proactive messages for an agent */

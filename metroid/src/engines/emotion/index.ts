@@ -44,6 +44,20 @@ const DOMINANCE_DOWN_WORDS = [
   '也许', '可能', '我觉得', '不确定', '对不起', '抱歉', '请', '能不能', '可以吗',
 ];
 
+/** Check if text contains strong emotion signals (keywords or repeated punctuation) */
+function hasStrongEmotionSignal(text: string): boolean {
+  const lower = text.toLowerCase();
+  const emotionKeywords = [
+    ...POSITIVE_WORDS.slice(0, 15), // love, great, amazing, etc.
+    ...NEGATIVE_WORDS.slice(0, 15), // hate, angry, sad, etc.
+    '😭', '😡', '🥺', '❤', '💔', '🔥',
+  ];
+  if (emotionKeywords.some(w => lower.includes(w))) return true;
+  // Repeated punctuation: !!!, ???, ！！！
+  if (/[!！?？]{2,}/.test(text)) return true;
+  return false;
+}
+
 /**
  * Emotion Engine: PAD-model emotion tracking with LLM semantic analysis.
  *
@@ -70,7 +84,8 @@ export class EmotionEngine implements Engine {
     if (!agent) return [];
 
     // Apply recovery (drift toward baseline)
-    const baseline = agent.card.emotion?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    const rawBaseline = agent.card.emotion?.baseline ?? { pleasure: 0, arousal: 0, dominance: 0 };
+    const baseline = { ...rawBaseline, arousal: Math.min(rawBaseline.arousal, 0.5) };
     const current = { ...agent.emotionState };
     const lastUpdate = this.lastUpdateTime.get(context.agentId) ?? Date.now();
     const elapsedHours = (Date.now() - lastUpdate) / 3_600_000;
@@ -83,7 +98,15 @@ export class EmotionEngine implements Engine {
 
     const expressiveness = agent.card.emotion?.expressiveness ?? 1.0;
     const intensityDial = (agent.card.emotion?.intensityDial ?? 0.8) * expressiveness;
-    const hints = this.translateToStyleHints(recovered, intensityDial, expressiveness);
+
+    // Dampen arousal for short casual inputs (don't persist — hint-only)
+    let hintState = { ...recovered };
+    const inputText = context.message?.content ?? '';
+    if (inputText.length < 20 && !hasStrongEmotionSignal(inputText)) {
+      hintState.arousal = Math.min(hintState.arousal, 0.3);
+    }
+
+    const hints = this.translateToStyleHints(hintState, intensityDial, expressiveness);
     if (!hints) return [];
 
     // Append emotion trajectory if available
@@ -95,13 +118,14 @@ export class EmotionEngine implements Engine {
         const parts = nonStable.map(([axis, v]) => {
           const axisName = axis === 'pleasure' ? '愉悦度' : axis === 'arousal' ? '激活度' : '支配感';
           const dir = v.direction === 'rising' ? '上升中' : '下降中';
-          return `${axisName}${dir} (${v.delta > 0 ? '+' : ''}${v.delta.toFixed(2)}, 过去${v.durationMin}分钟)`;
+          const magnitude = Math.abs(v.delta) > 0.15 ? '明显' : '略微';
+          return `${axisName}${magnitude}${dir}`;
         });
         trajectoryLine = `\n情绪趋势: ${parts.join(', ')}`;
       }
     }
 
-    const content = `<emotion_context>\n${hints}${trajectoryLine}\n</emotion_context>`;
+    const content = `[角色情绪参考]\n${hints}${trajectoryLine}`;
     return [{
       source: 'emotion',
       content,
@@ -231,9 +255,9 @@ export class EmotionEngine implements Engine {
 
     // Describe emotional state, not prescribe behavior
     const desc: string[] = [];
-    if (Math.abs(p) >= threshold) desc.push(`愉悦度: ${p > 0 ? '正面' : '负面'} (${p.toFixed(2)})`);
-    if (Math.abs(a) >= threshold) desc.push(`激活度: ${a > 0 ? '高' : '低'} (${a.toFixed(2)})`);
-    if (Math.abs(d) >= threshold) desc.push(`支配感: ${d > 0 ? '强' : '弱'} (${d.toFixed(2)})`);
+    if (Math.abs(p) >= threshold) desc.push(`愉悦度: ${Math.abs(p) > 0.5 ? (p > 0 ? '强烈愉悦' : '强烈不快') : (p > 0 ? '轻微愉悦' : '轻微不快')}`);
+    if (Math.abs(a) >= threshold) desc.push(`激活度: ${Math.abs(a) > 0.5 ? (a > 0 ? '非常亢奋' : '非常低沉') : (a > 0 ? '有些亢奋' : '有些低沉')}`);
+    if (Math.abs(d) >= threshold) desc.push(`支配感: ${Math.abs(d) > 0.5 ? (d > 0 ? '强烈掌控感' : '强烈顺从感') : (d > 0 ? '些许掌控感' : '些许顺从感')}`);
 
     const lines = [`角色当前内心情绪: ${desc.join(', ')}`];
     if (expressiveness < 0.5) {
@@ -249,8 +273,10 @@ export class EmotionEngine implements Engine {
     text: string,
     history: { content: string }[],
   ): Promise<EmotionState | null> {
-    const baseUrl = this.config.llm.openaiBaseUrl;
-    const apiKey = this.config.llm.openaiApiKey || this.config.llm.apiKey;
+    // Prefer dedicated emotion LLM config, fall back to shared openai config
+    const baseUrl = this.config.emotion.llmBaseUrl || this.config.llm.openaiBaseUrl;
+    const apiKey = this.config.emotion.llmApiKey || this.config.llm.openaiApiKey || this.config.llm.apiKey;
+    const model = this.config.emotion.llmModel || this.config.llm.openaiModel || this.config.llm.lightModel;
     if (!baseUrl || !apiKey) return null;
 
     const snippet = [text, ...history.map(h => h.content)].join('\n').slice(0, 800);
@@ -263,7 +289,7 @@ export class EmotionEngine implements Engine {
         'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: this.config.llm.openaiModel || this.config.llm.lightModel,
+        model,
         messages: [{
           role: 'user',
           content: `分析以下对话片段的情感变化，返回PAD情感模型的变化量（delta）。

@@ -39,6 +39,10 @@ export interface MetroidConfig {
     minChangeInterval: number;   // ms between updates
     maxChangePerUpdate: number;  // max PAD axis delta
     recoveryRate: number;        // per-hour drift toward baseline
+    // Dedicated LLM for emotion analysis (falls back to llm.openai* if unset)
+    llmBaseUrl?: string;
+    llmApiKey?: string;
+    llmModel?: string;
   };
 
   // Growth engine
@@ -98,6 +102,9 @@ export const defaultConfig: MetroidConfig = {
     minChangeInterval: 30_000,
     maxChangePerUpdate: 0.3,
     recoveryRate: 0.05,
+    llmBaseUrl: process.env.EMOTION_LLM_BASE_URL,
+    llmApiKey: process.env.EMOTION_LLM_API_KEY,
+    llmModel: process.env.EMOTION_LLM_MODEL,
   },
 
   growth: {
