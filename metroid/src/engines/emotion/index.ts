@@ -106,6 +106,55 @@ export class EmotionEngine implements Engine {
       hintState.arousal = Math.min(hintState.arousal, 0.3);
     }
 
+    // P0-2: Input intensity scaling
+    let intensityConstraint = '';
+    const inputIntensity = context.inputIntensity;
+    if (inputIntensity !== undefined) {
+      if (inputIntensity <= 2) {
+        // Minimal input (greetings, etc.) — suppress all emotion hints
+        return [];
+      } else if (inputIntensity <= 5) {
+        // Casual chat — reduce all axes by 50%
+        hintState.pleasure *= 0.5;
+        hintState.arousal *= 0.5;
+        hintState.dominance *= 0.5;
+      }
+      // inputIntensity >= 6: use as-is
+
+      if (inputIntensity <= 3) {
+        intensityConstraint = '\n用户输入强度很低，请以同等轻松的语气回复。';
+      } else if (inputIntensity <= 6) {
+        intensityConstraint = '\n请保持适度的情感强度。';
+      }
+    }
+
+    // P2-2: NSFW escalation ceiling for early conversations
+    let ceilingNote = '';
+    if (context.conversationHistory.length < 3) {
+      let capped = false;
+      if (hintState.arousal > 0.4) {
+        hintState.arousal = 0.4;
+        capped = true;
+      }
+      if (hintState.pleasure > 0.4) {
+        hintState.pleasure = 0.4;
+        capped = true;
+      } else if (hintState.pleasure < -0.4) {
+        hintState.pleasure = -0.4;
+        capped = true;
+      }
+      if (hintState.dominance > 0.4) {
+        hintState.dominance = 0.4;
+        capped = true;
+      } else if (hintState.dominance < -0.4) {
+        hintState.dominance = -0.4;
+        capped = true;
+      }
+      if (capped) {
+        ceilingNote = '\n对话初期，角色情绪应逐步展开，避免极端情绪表现。';
+      }
+    }
+
     const hints = this.translateToStyleHints(hintState, intensityDial, expressiveness);
     if (!hints) return [];
 
@@ -125,7 +174,7 @@ export class EmotionEngine implements Engine {
       }
     }
 
-    const content = `[角色情绪参考]\n${hints}${trajectoryLine}`;
+    const content = `[角色情绪参考]\n${hints}${trajectoryLine}${ceilingNote}${intensityConstraint}`;
     return [{
       source: 'emotion',
       content,

@@ -353,6 +353,8 @@ export interface Engine {
   fallback?(): PromptFragment[];
 }
 
+export type InputType = 'greeting' | 'question' | 'emotional' | 'rp_action' | 'meta_challenge' | 'casual_chat' | 'explicit_instruction';
+
 export interface EngineContext {
   agentId: string;
   mode: AgentMode;
@@ -360,6 +362,10 @@ export interface EngineContext {
   conversationHistory: MetroidMessage[];
   userName?: string;
   emotionTrajectory?: Record<string, { direction: 'rising' | 'falling' | 'stable'; delta: number; durationMin: number }>;
+  /** 0-10 scale of input emotional intensity, computed from length + keywords + punctuation */
+  inputIntensity?: number;
+  /** Classified input type for adjusting RP behavior */
+  inputType?: InputType;
 }
 
 // === V8: Social Engine Types ===

@@ -42,6 +42,11 @@ export class MemoryEngine implements Engine {
 
   /** Retrieve relevant memories and format as prompt fragments */
   async getPromptFragments(context: EngineContext): Promise<PromptFragment[]> {
+    // Cold-start guard: no memories on first turn to prevent hallucinated shared history
+    if (context.conversationHistory.length === 0) {
+      return [];
+    }
+
     const fragments: PromptFragment[] = [];
 
     // Standard memory retrieval (keyword + vector)
@@ -90,17 +95,20 @@ export class MemoryEngine implements Engine {
 
   /** After LLM response: encode the exchange into memory */
   async onResponse(response: string, context: EngineContext): Promise<void> {
-    // Encode user message — always store
+    const isColdStart = context.conversationHistory.length === 0;
+
+    // Encode user message — always store (even on cold start)
     this.encoder.encode(
       context.agentId,
       context.message.content,
       context.message.id,
     );
 
-    // Encode agent response — always store
+    // Encode agent response — on cold start, prefix to lower importance
+    const responseContent = isColdStart ? `[初次回复] ${response}` : response;
     this.encoder.encode(
       context.agentId,
-      response,
+      responseContent,
       `response-${context.message.id}`,
     );
 

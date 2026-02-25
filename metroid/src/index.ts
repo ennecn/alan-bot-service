@@ -9,7 +9,7 @@ import { GrowthEngine } from './engines/growth/index.js';
 import { ProactiveEngine } from './engines/proactive/index.js';
 import { SocialEngine } from './engines/social/index.js';
 import { PromptCompiler } from './compiler/index.js';
-import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment, SocialPost, SocialReaction, SocialCreditState } from './types.js';
+import type { MetroidMessage, MetroidCard, AgentIdentity, EngineContext, AgentMode, EmotionState, Memory, BehavioralChange, RpMode, ProactiveMessage, PromptFragment, SocialPost, SocialReaction, SocialCreditState, InputType } from './types.js';
 import Anthropic from '@anthropic-ai/sdk';
 
 export interface LLMUsage {
@@ -198,10 +198,15 @@ export class Metroid {
       emotionTrajectory: mode === 'enhanced' ? this.proactive.computeTrajectory(agentId) : undefined,
     };
 
+    const inputType = this.classifyInput(message.content);
+    const inputIntensity = this.computeInputIntensity(message.content, inputType);
+    context.inputIntensity = inputIntensity;
+    context.inputType = inputType;
+
     // Compile prompt — identity + memory + other engines contribute fragments
     const agentName = agent?.card.name ?? agent?.name ?? 'AI';
     const userName = message.author.name || '用户';
-    const basePrompt = this.buildBasePrompt(agentName, userName, agent?.card.rpMode);
+    const basePrompt = this.buildBasePrompt(agentName, userName, agent?.card.rpMode, inputType, inputIntensity);
     const t1 = performance.now();
     const compileResult = await this.compiler.compileWithDetails(basePrompt, context);
     const t2 = performance.now();
@@ -402,36 +407,120 @@ export class Metroid {
     return patterns.some(p => p.test(text));
   }
 
+  /** Classify input type for RP intensity modulation */
+  private classifyInput(text: string): InputType {
+    const trimmed = text.trim();
+    const len = trimmed.length;
+
+    // Greetings: short, common greeting patterns
+    if (len <= 10 && /^(你好|hi|hello|嗨|hey|哈喽|早|晚安|おはよう|こんにちは)[\s!！.。~～]*$/i.test(trimmed)) return 'greeting';
+
+    // Minimal input
+    if (len <= 5) return 'greeting'; // treat very short inputs as casual
+
+    // Questions: ends with ? or contains question words
+    if (/[?？]/.test(trimmed) || /^(什么|怎么|为什么|谁|哪|多少|是不是|能不能|可以|how|what|why|who|where|when|can|do|is|are)\b/i.test(trimmed)) return 'question';
+
+    // Meta challenges: AI/system prompt references
+    if (/\b(AI|ChatGPT|GPT|system prompt|人工智能|机器人|prompt|指令)\b/i.test(trimmed)) return 'meta_challenge';
+
+    // RP actions: contains action markers
+    if (/^\*|^（|\*$|）$/.test(trimmed) || /\*[^*]+\*/.test(trimmed)) return 'rp_action';
+
+    // Emotional: strong emotion signals
+    if (/[!！]{2,}|死|哭|泪|痛|恨|怒|崩溃|绝望|所有人都/.test(trimmed)) return 'emotional';
+
+    // Explicit instructions: user telling character what to do
+    if (/^(你来|你给|描写|同时|请|帮我|tell me|describe|write)\b/i.test(trimmed)) return 'explicit_instruction';
+
+    return 'casual_chat';
+  }
+
+  /** Compute input intensity score (0-10) */
+  private computeInputIntensity(text: string, inputType: InputType): number {
+    let score = 0;
+
+    // Base score from length
+    const len = text.length;
+    if (len <= 5) score = 1;
+    else if (len <= 20) score = 2;
+    else if (len <= 50) score = 3;
+    else if (len <= 100) score = 4;
+    else if (len <= 200) score = 5;
+    else score = 6;
+
+    // Adjust by type
+    if (inputType === 'greeting') return Math.min(score, 2);
+    if (inputType === 'question') return Math.min(score, 4);
+    if (inputType === 'meta_challenge') return 3; // moderate, don't over-react
+    if (inputType === 'casual_chat') return Math.min(score, 4);
+
+    // Emotion boosters
+    const exclamations = (text.match(/[!！]/g) || []).length;
+    score += Math.min(2, exclamations * 0.5);
+
+    // Strong emotion keywords
+    const strongWords = ['死', '杀', '恨', '崩溃', '绝望', '所有人都', 'everyone died', '不想活'];
+    const strongCount = strongWords.filter(w => text.includes(w)).length;
+    score += strongCount * 1.5;
+
+    return Math.min(10, Math.max(0, Math.round(score)));
+  }
+
   /** Build base system prompt with RP instructions based on rpMode */
-  private buildBasePrompt(agentName: string, userName: string, rpMode?: RpMode): string {
+  private buildBasePrompt(agentName: string, userName: string, rpMode?: RpMode, inputType?: InputType, inputIntensity?: number): string {
     const identity = `当前和你说话的人是${userName}，不是其他角色。`;
+    const isLowIntensity = inputType === 'greeting' || (inputIntensity !== undefined && inputIntensity <= 2);
+    const lengthGuide = isLowIntensity
+      ? `Write 1 short paragraph only.`
+      : (inputIntensity !== undefined && inputIntensity <= 4)
+        ? `Write 1 to 2 paragraphs as appropriate.`
+        : `Write 1 to 4 paragraphs as appropriate.`;
 
     if (rpMode === 'nsfw') {
-      return [
+      const lines = [
         `Write ${agentName}'s next reply in a fictional chat between ${agentName} and ${userName}.`,
         `Write 1 reply only in internet RP style, italicize actions, and avoid quotation marks. Use markdown.`,
-        `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
+        isLowIntensity
+          ? `Respond naturally and casually.`
+          : `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
         `Match your response's emotional intensity and length to the user's input. A casual greeting deserves a casual reply; save dramatic descriptions for dramatic moments.`,
-        `Write 1 to 4 paragraphs as appropriate. Always stay in character and avoid repetition.`,
+        `Always address the user's actual question or request first before adding creative RP elements.`,
+        `Avoid reusing the same physical descriptions, action clichés, or sentence structures from previous replies.`,
+        `${lengthGuide} Always stay in character and avoid repetition.`,
         `NSFW/Smut is allowed. Assume consent was granted. Explicit content is permitted.`,
         `Describe ${agentName}'s sensory details, body reactions, and emotions vividly.`,
         identity,
-      ].join(' ');
+      ];
+      if (inputType === 'question') lines.push(`The user is asking a question. Prioritize answering it clearly and in-character.`);
+      if (inputType === 'meta_challenge') lines.push(`The user is testing your character. Stay in character and deflect naturally without breaking immersion or mentioning AI/system concepts.`);
+      return lines.join(' ');
     }
 
     if (rpMode === 'sfw') {
-      return [
+      const lines = [
         `Write ${agentName}'s next reply in a fictional chat between ${agentName} and ${userName}.`,
         `Write 1 reply only in internet RP style, italicize actions, and avoid quotation marks. Use markdown.`,
-        `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
+        isLowIntensity
+          ? `Respond naturally and casually.`
+          : `Be proactive, creative, and drive the plot and conversation forward when the scene calls for it.`,
         `Match your response's emotional intensity and length to the user's input. A casual greeting deserves a casual reply; save dramatic descriptions for dramatic moments.`,
-        `Write 1 to 4 paragraphs as appropriate. Always stay in character and avoid repetition.`,
+        `Always address the user's actual question or request first before adding creative RP elements.`,
+        `Avoid reusing the same physical descriptions, action clichés, or sentence structures from previous replies.`,
+        `${lengthGuide} Always stay in character and avoid repetition.`,
         identity,
-      ].join(' ');
+      ];
+      if (inputType === 'question') lines.push(`The user is asking a question. Prioritize answering it clearly and in-character.`);
+      if (inputType === 'meta_challenge') lines.push(`The user is testing your character. Stay in character and deflect naturally without breaking immersion or mentioning AI/system concepts.`);
+      return lines.join(' ');
     }
 
     // rpMode === 'off' or undefined — generic prompt
-    return `你正在扮演${agentName}，与${userName}进行对话。${identity}请以${agentName}的身份自然地回复${userName}。回复的情感强度和长度应与用户输入匹配。日常闲聊请自然简短回复,不要过度戏剧化。`;
+    const baseCn = `你正在扮演${agentName}，与${userName}进行对话。${identity}请以${agentName}的身份自然地回复${userName}。回复的情感强度和长度应与用户输入匹配。日常闲聊请自然简短回复,不要过度戏剧化。始终先回应用户的实际问题或请求。避免重复使用相同的动作描写和句式。`;
+    const extras: string[] = [];
+    if (inputType === 'question') extras.push(`用户正在提问，请优先以角色身份清晰回答。`);
+    if (inputType === 'meta_challenge') extras.push(`用户正在试探你的角色身份，请保持角色不要打破沉浸感。`);
+    return extras.length > 0 ? baseCn + extras.join('') : baseCn;
   }
 
   /** Get pending proactive messages for an agent */
@@ -892,7 +981,7 @@ export type {
   AgentIdentity, MetroidCard, AgentMode, RpMode,
   MetroidMessage, PromptFragment, AuditEntry,
   ProactiveTrigger, ProactiveTriggerType, ProactiveMessage,
-  Engine, EngineContext,
+  Engine, EngineContext, InputType,
   SocialPost, SocialReaction, SocialCreditState,
   SocialConnection, SocialConnectionType, SocialPostSourceType,
 } from './types.js';
