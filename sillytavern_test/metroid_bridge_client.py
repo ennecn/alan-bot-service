@@ -45,7 +45,7 @@ class MetroidBridge:
         for wi in (worldinfo_files or []):
             self.client.import_worldinfo(wi)
 
-    def send_and_capture(self, message, character=None, timeout=15):
+    def send_and_capture(self, message, character=None, timeout=15, retries=2):
         """
         Send a message through the bridge and capture ST's real prompt.
 
@@ -55,28 +55,34 @@ class MetroidBridge:
 
         Returns: list of {role, content} dicts, or None on timeout
         """
-        # Clear any stale state
-        self.clear()
+        for attempt in range(retries):
+            # Clear any stale state
+            self.clear()
 
-        # Queue the message
-        body = {"message": message}
-        if character:
-            body["character"] = character
-        r = self._session.post(f"{self.plugin_base}/send-message", json=body)
-        r.raise_for_status()
+            # Queue the message
+            body = {"message": message}
+            if character:
+                body["character"] = character
+            r = self._session.post(f"{self.plugin_base}/send-message", json=body)
+            r.raise_for_status()
 
-        # Long-poll for the captured prompt
-        timeout_ms = int(timeout * 1000)
-        r = self._session.get(
-            f"{self.plugin_base}/last-prompt",
-            params={"wait": "true", "timeout": str(timeout_ms)},
-            timeout=timeout + 5,
-        )
-        r.raise_for_status()
-        data = r.json()
+            # Long-poll for the captured prompt
+            timeout_ms = int(timeout * 1000)
+            r = self._session.get(
+                f"{self.plugin_base}/last-prompt",
+                params={"wait": "true", "timeout": str(timeout_ms)},
+                timeout=timeout + 5,
+            )
+            r.raise_for_status()
+            data = r.json()
 
-        if data.get("ok") and data.get("prompt"):
-            return data["prompt"]["messages"]
+            if data.get("ok") and data.get("prompt"):
+                return data["prompt"]["messages"]
+
+            if attempt < retries - 1:
+                print(f"[RETRY] Attempt {attempt + 1} timed out, retrying...")
+                time.sleep(1)
+
         return None
 
     def compare_prompts(self, st_prompt, other_prompt, label="other"):

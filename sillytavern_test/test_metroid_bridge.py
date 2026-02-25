@@ -90,7 +90,7 @@ def test_compare_with_captured(bridge):
 
     # Load the first captured prompt as reference
     ref_path = os.path.join(captured_dir, files[0])
-    with open(ref_path) as f:
+    with open(ref_path, encoding="utf-8") as f:
         ref_data = json.load(f)
 
     ref_messages = ref_data if isinstance(ref_data, list) else ref_data.get("messages", [])
