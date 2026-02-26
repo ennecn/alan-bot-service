@@ -19,11 +19,20 @@ const DAILY_SKELETON: Array<{ hour: number; activity: string }> = [
   { hour: 22, activity: 'went to sleep' },
 ];
 
+export interface LifeSimulationConfig {
+  economyMode?: boolean;
+}
+
 export class LifeSimulation {
+  private economyMode: boolean;
+
   constructor(
     private eventBus: EventBus,
     private registry: AgentRegistry,
-  ) {}
+    config?: LifeSimulationConfig,
+  ) {
+    this.economyMode = config?.economyMode ?? false;
+  }
 
   /** Layer 0: Internal state change, no propagation */
   emitSelfMemory(agentId: string, content: string): LifeEvent {
@@ -77,6 +86,35 @@ export class LifeSimulation {
         payload: { layer: 3, content: fact },
       });
     }
+  }
+
+  /** Full 4-layer simulation step with economy mode support (PRD §8.4).
+   *  When economyMode is true, Layer 2 (LLM narrative expansion) is skipped —
+   *  the skeleton content from Layer 1 becomes the final content. */
+  async simulateEvent(
+    agentId: string,
+    activity: string,
+    enrichFn?: (skeleton: LifeEvent) => Promise<string>,
+  ): Promise<LifeEvent> {
+    // Layer 0: self-memory write
+    this.emitSelfMemory(agentId, activity);
+
+    // Layer 1: skeleton event
+    const skeleton = this.emitSkeleton(agentId, activity);
+
+    // Layer 2: narrative expansion (skipped in economy mode)
+    let finalEvent: LifeEvent;
+    if (this.economyMode || !enrichFn) {
+      finalEvent = skeleton;
+    } else {
+      const enriched = await enrichFn(skeleton);
+      finalEvent = this.enrichNarrative(skeleton, enriched);
+    }
+
+    // Layer 3: fact notification
+    this.broadcastFact(agentId, finalEvent.content);
+
+    return finalEvent;
   }
 
   /** Generate a list of skeleton events for a full day */

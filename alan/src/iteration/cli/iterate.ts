@@ -47,6 +47,7 @@ async function main(): Promise<void> {
     console.error('  --convergence <N>        Convergence threshold (default 0.01)');
     console.error('  --max-regression <N>     Max regression threshold (default 0.05)');
     console.error('  --tiers <list>           Allowed tiers, comma-separated (default: parameter,prompt)');
+    console.error('  --auto-approve           Auto-approve code-tier modifications (for testing/CI)');
     process.exit(1);
   }
 
@@ -75,6 +76,8 @@ async function main(): Promise<void> {
   const tiersStr = args['tiers'] ?? 'parameter,prompt';
   const allowedTiers = tiersStr.split(',').map((t) => t.trim()) as IterationConfig['allowedTiers'];
 
+  const autoApprove = args['auto-approve'] === 'true';
+
   const config: IterationConfig = {
     maxIterations: parseInt(args['max-iterations'] ?? '5', 10),
     convergenceThreshold: parseFloat(args['convergence'] ?? '0.01'),
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
     apiKey: args['api-key'],
     workspacePath,
     dryRun: args['dry-run'] === 'true',
+    approvalCallback: autoApprove ? async () => true : undefined,
   };
 
   console.log('=== Alan Auto-Iteration Engine ===');
@@ -92,6 +96,7 @@ async function main(): Promise<void> {
   console.log(`Max iterations: ${config.maxIterations}`);
   console.log(`Dry run: ${config.dryRun ?? false}`);
   console.log(`Allowed tiers: ${config.allowedTiers.join(', ')}`);
+  console.log(`Auto-approve code: ${autoApprove}`);
   console.log(`Verdicts loaded: ${verdicts.length}`);
   console.log('');
 

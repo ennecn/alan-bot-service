@@ -112,6 +112,82 @@ export class IterationEngine {
         branch = branchCheck.details?.branch as string | undefined;
       }
 
+      // 5b. Approval gate for code-tier modifications
+      const hasCodeMods = hypothesis.modifications.some(
+        (m) => m.tier === 'code',
+      );
+      if (hasCodeMods) {
+        if (!this.config.approvalCallback) {
+          console.log(
+            `[engine] Skipping code modification: no approval callback configured`,
+          );
+          const result: IterationResult = {
+            iteration: i,
+            hypothesis,
+            beforeScore: currentScore,
+            afterScore: currentScore,
+            improvement: 0,
+            safetyChecks: [
+              scopeCheck,
+              {
+                passed: false,
+                tier: 1,
+                message:
+                  'Code modification skipped: no approval callback configured',
+              },
+            ],
+            committed: false,
+            reverted: false,
+            branch,
+          };
+          iterations.push(result);
+          await this.notifier?.iterationCompleted(result);
+          continue; // Try next iteration
+        }
+
+        // Notify about pending approval
+        await this.notifier?.approvalRequired(i, hypothesis);
+
+        // Check approval for each code modification
+        let approved = true;
+        for (const mod of hypothesis.modifications) {
+          if (mod.tier === 'code') {
+            const ok = await this.config.approvalCallback(mod);
+            if (!ok) {
+              approved = false;
+              break;
+            }
+          }
+        }
+
+        if (!approved) {
+          console.log(
+            `[engine] Code modification rejected by approval callback`,
+          );
+          const result: IterationResult = {
+            iteration: i,
+            hypothesis,
+            beforeScore: currentScore,
+            afterScore: currentScore,
+            improvement: 0,
+            safetyChecks: [
+              scopeCheck,
+              {
+                passed: false,
+                tier: 1,
+                message: 'Code modification rejected by approval callback',
+              },
+            ],
+            committed: false,
+            reverted: false,
+            branch,
+          };
+          iterations.push(result);
+          await this.notifier?.iterationCompleted(result);
+          continue; // Try next iteration
+        }
+      }
+
       // 6. Apply modifications
       if (!this.config.dryRun) {
         this.modifier.applyAll(hypothesis.modifications);

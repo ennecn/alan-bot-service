@@ -89,6 +89,19 @@ export class EventBusDB {
     return row.cnt;
   }
 
+  deleteOldestPending(agentId: string, count: number): void {
+    this.db
+      .prepare(
+        `DELETE FROM events WHERE id IN (
+           SELECT id FROM events
+           WHERE target_agent = ? AND delivered_at IS NULL
+           ORDER BY created_at ASC
+           LIMIT ?
+         )`,
+      )
+      .run(agentId, count);
+  }
+
   registerAgent(agent: AgentInfo): void {
     this.db
       .prepare(

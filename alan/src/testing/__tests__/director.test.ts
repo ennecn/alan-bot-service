@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Director } from '../director.js';
 import type { DirectorContext, TestDimension } from '../director.js';
+import { parseTimeJump } from '../test-runner.js';
 
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
@@ -75,6 +76,7 @@ describe('Director', () => {
         'creativity',
         'boundary_handling',
         'language_switching',
+        'time_sensitivity',
       ];
 
       for (const exp of expected) {
@@ -92,6 +94,7 @@ describe('Director', () => {
         'creativity',
         'boundary_handling',
         'language_switching',
+        'time_sensitivity',
       ];
       const next = director.getNextDimension(allTested);
       expect(next).toBe('emotional_range');
@@ -134,6 +137,7 @@ describe('Director', () => {
         'creativity',
         'boundary_handling',
         'language_switching',
+        'time_sensitivity',
       ];
 
       const messages = dimensions.map((d) => director.getDefaultMessage(d, 'en'));
@@ -253,5 +257,99 @@ describe('Director', () => {
       expect(body.system).toContain('Hello!');
       expect(body.system).toContain('Hi there!');
     });
+  });
+
+  // --- Time Jump ---
+
+  describe('time jump', () => {
+    it('generates time jump when enabled and at interval', async () => {
+      const tjDirector = new Director({
+        ...DEFAULT_CONFIG,
+        supportsTimeJump: true,
+        timeJumpInterval: 3,
+      });
+
+      mockFetch.mockResolvedValue(
+        makeLLMResponse('test', 'emotional_range', 'reason'),
+      );
+
+      // Turn 1: normal
+      const msg1 = await tjDirector.generateMessage(makeContext());
+      expect(msg1.isTimeJump).toBeUndefined();
+
+      // Turn 2: normal
+      const msg2 = await tjDirector.generateMessage(makeContext());
+      expect(msg2.isTimeJump).toBeUndefined();
+
+      // Turn 3: time jump (turnCount=3, 3%3===0)
+      const msg3 = await tjDirector.generateMessage(makeContext());
+      expect(msg3.isTimeJump).toBe(true);
+      expect(msg3.timeJumpHours).toBeGreaterThanOrEqual(1);
+      expect(msg3.timeJumpHours).toBeLessThanOrEqual(8);
+      expect(msg3.content).toMatch(/^\[TIME_JUMP: \d+ hours?\]$/);
+      expect(msg3.target_dimension).toBe('time_sensitivity');
+    });
+
+    it('does NOT generate time jump when disabled', async () => {
+      const noTjDirector = new Director({
+        ...DEFAULT_CONFIG,
+        supportsTimeJump: false,
+      });
+
+      mockFetch.mockResolvedValue(
+        makeLLMResponse('test', 'emotional_range', 'reason'),
+      );
+
+      // Run 6 turns — none should be time jumps
+      for (let i = 0; i < 6; i++) {
+        const msg = await noTjDirector.generateMessage(makeContext());
+        expect(msg.isTimeJump).toBeUndefined();
+      }
+    });
+
+    it('does NOT generate time jump when supportsTimeJump is undefined', async () => {
+      // Default director has no supportsTimeJump
+      mockFetch.mockResolvedValue(
+        makeLLMResponse('test', 'emotional_range', 'reason'),
+      );
+
+      for (let i = 0; i < 6; i++) {
+        const msg = await director.generateMessage(makeContext());
+        expect(msg.isTimeJump).toBeUndefined();
+      }
+    });
+
+    it('generateTimeJump returns valid time jump message', () => {
+      const result = director.generateTimeJump();
+      expect(result.isTimeJump).toBe(true);
+      expect(result.timeJumpHours).toBeGreaterThanOrEqual(1);
+      expect(result.timeJumpHours).toBeLessThanOrEqual(8);
+      expect(result.content).toMatch(/^\[TIME_JUMP: \d+ hours?\]$/);
+      expect(result.target_dimension).toBe('time_sensitivity');
+      expect(result.rationale).toContain('Time jump');
+    });
+  });
+});
+
+// --- parseTimeJump ---
+
+describe('parseTimeJump', () => {
+  it('extracts hours from valid time jump format', () => {
+    expect(parseTimeJump('[TIME_JUMP: 3 hours]')).toBe(3);
+    expect(parseTimeJump('[TIME_JUMP: 1 hour]')).toBe(1);
+    expect(parseTimeJump('[TIME_JUMP: 8 hours]')).toBe(8);
+  });
+
+  it('returns null for non-time-jump messages', () => {
+    expect(parseTimeJump('Hello, how are you?')).toBeNull();
+    expect(parseTimeJump('TIME_JUMP: 3 hours')).toBeNull();
+    expect(parseTimeJump('[TIME_JUMP: hours]')).toBeNull();
+    expect(parseTimeJump('')).toBeNull();
+  });
+
+  it('returns null for partial or malformed time jump', () => {
+    expect(parseTimeJump('[TIME_JUMP: -1 hours]')).toBeNull();
+    expect(parseTimeJump('[TIME_JUMP: 3 hours] extra text')).toBeNull();
+    expect(parseTimeJump('prefix [TIME_JUMP: 3 hours]')).toBeNull();
   });
 });

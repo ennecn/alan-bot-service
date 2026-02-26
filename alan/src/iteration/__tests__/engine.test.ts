@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { IterationEngine } from '../engine.js';
-import type { IterationConfig } from '../types.js';
+import type { IterationConfig, Hypothesis } from '../types.js';
 import type { JudgeVerdictLike } from '../analyzer.js';
 
 // Mock child_process to avoid actual git/test commands
@@ -138,5 +138,208 @@ describe('IterationEngine', () => {
 
     expect(summary.startScore).toBe(0);
     expect(summary.totalIterations).toBeGreaterThanOrEqual(0);
+  });
+
+  describe('approval gate', () => {
+    function makeCodeHypothesis(): Hypothesis {
+      return {
+        id: 'hyp-code-test',
+        targetDimension: 'character_fidelity',
+        tier: 'code',
+        description: 'Refactor emotion parser for better fidelity',
+        modifications: [
+          {
+            tier: 'code',
+            targetFile: 'src/emotion.ts',
+            change: {
+              type: 'code',
+              patch: '--- a/src/emotion.ts\n+++ b/src/emotion.ts\n@@ -1 +1 @@\n-old\n+new',
+              description: 'Refactor emotion parser',
+            },
+          },
+        ],
+        expectedImprovement: 0.15,
+        confidence: 0.7,
+      };
+    }
+
+    function makeParameterHypothesis(): Hypothesis {
+      return {
+        id: 'hyp-param-test',
+        targetDimension: 'engagement',
+        tier: 'parameter',
+        description: 'Adjust engagement weight',
+        modifications: [
+          {
+            tier: 'parameter',
+            targetFile: 'config/alan.json',
+            change: {
+              type: 'parameter',
+              key: 'engagement_weight',
+              oldValue: 0.5,
+              newValue: 0.7,
+            },
+          },
+        ],
+        expectedImprovement: 0.1,
+        confidence: 0.6,
+      };
+    }
+
+    it('should proceed without approval for parameter (tier 1) modifications', async () => {
+      // Spy on HypothesisGenerator to return parameter hypothesis
+      const { HypothesisGenerator } = await import('../hypothesis.js');
+      const genSpy = vi.spyOn(HypothesisGenerator.prototype, 'generate')
+        .mockResolvedValue(makeParameterHypothesis());
+
+      const callback = vi.fn();
+      const config = makeConfig({
+        dryRun: true,
+        maxIterations: 1,
+        allowedTiers: ['parameter', 'prompt', 'code'],
+        approvalCallback: callback,
+      });
+
+      const engine = new IterationEngine(config);
+      await engine.run(makeVerdicts(3.0));
+
+      // Callback should never be called for parameter-tier modifications
+      expect(callback).not.toHaveBeenCalled();
+      genSpy.mockRestore();
+    });
+
+    it('should proceed without approval for prompt (tier 2) modifications', async () => {
+      const promptHypothesis: Hypothesis = {
+        id: 'hyp-prompt-test',
+        targetDimension: 'creativity',
+        tier: 'prompt',
+        description: 'Rewrite creativity section',
+        modifications: [
+          {
+            tier: 'prompt',
+            targetFile: 'prompts/system.txt',
+            change: {
+              type: 'prompt',
+              section: 'creativity',
+              oldText: 'be creative',
+              newText: 'express unique ideas with vivid detail',
+            },
+          },
+        ],
+        expectedImprovement: 0.12,
+        confidence: 0.65,
+      };
+
+      const { HypothesisGenerator } = await import('../hypothesis.js');
+      const genSpy = vi.spyOn(HypothesisGenerator.prototype, 'generate')
+        .mockResolvedValue(promptHypothesis);
+
+      const callback = vi.fn();
+      const config = makeConfig({
+        dryRun: true,
+        maxIterations: 1,
+        allowedTiers: ['parameter', 'prompt', 'code'],
+        approvalCallback: callback,
+      });
+
+      const engine = new IterationEngine(config);
+      await engine.run(makeVerdicts(3.0));
+
+      expect(callback).not.toHaveBeenCalled();
+      genSpy.mockRestore();
+    });
+
+    it('should block code modifications when no approval callback configured', async () => {
+      const { HypothesisGenerator } = await import('../hypothesis.js');
+      const genSpy = vi.spyOn(HypothesisGenerator.prototype, 'generate')
+        .mockResolvedValue(makeCodeHypothesis());
+
+      const config = makeConfig({
+        dryRun: true,
+        maxIterations: 1,
+        allowedTiers: ['parameter', 'prompt', 'code'],
+        // No approvalCallback — code should be blocked
+      });
+
+      const engine = new IterationEngine(config);
+      const summary = await engine.run(makeVerdicts(3.0));
+
+      // Iteration should not be committed
+      expect(summary.iterations.length).toBe(1);
+      expect(summary.iterations[0].committed).toBe(false);
+      expect(summary.iterations[0].safetyChecks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            passed: false,
+            message: expect.stringContaining('no approval callback'),
+          }),
+        ]),
+      );
+
+      genSpy.mockRestore();
+    });
+
+    it('should proceed with code modifications when callback returns true', async () => {
+      const { HypothesisGenerator } = await import('../hypothesis.js');
+      const genSpy = vi.spyOn(HypothesisGenerator.prototype, 'generate')
+        .mockResolvedValue(makeCodeHypothesis());
+
+      const callback = vi.fn().mockResolvedValue(true);
+      const config = makeConfig({
+        dryRun: true,
+        maxIterations: 1,
+        allowedTiers: ['parameter', 'prompt', 'code'],
+        approvalCallback: callback,
+      });
+
+      const engine = new IterationEngine(config);
+      const summary = await engine.run(makeVerdicts(3.0));
+
+      // Callback should have been called with the code modification
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(
+        expect.objectContaining({ tier: 'code' }),
+      );
+
+      // Iteration should be committed (in dry run, always commits)
+      expect(summary.iterations.length).toBe(1);
+      expect(summary.iterations[0].committed).toBe(true);
+
+      genSpy.mockRestore();
+    });
+
+    it('should skip code modifications when callback returns false', async () => {
+      const { HypothesisGenerator } = await import('../hypothesis.js');
+      const genSpy = vi.spyOn(HypothesisGenerator.prototype, 'generate')
+        .mockResolvedValue(makeCodeHypothesis());
+
+      const callback = vi.fn().mockResolvedValue(false);
+      const config = makeConfig({
+        dryRun: true,
+        maxIterations: 1,
+        allowedTiers: ['parameter', 'prompt', 'code'],
+        approvalCallback: callback,
+      });
+
+      const engine = new IterationEngine(config);
+      const summary = await engine.run(makeVerdicts(3.0));
+
+      // Callback should have been called
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Iteration should be skipped (not committed)
+      expect(summary.iterations.length).toBe(1);
+      expect(summary.iterations[0].committed).toBe(false);
+      expect(summary.iterations[0].safetyChecks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            passed: false,
+            message: expect.stringContaining('rejected'),
+          }),
+        ]),
+      );
+
+      genSpy.mockRestore();
+    });
   });
 });

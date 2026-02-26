@@ -179,6 +179,49 @@ describe('SafetySystem', () => {
     });
   });
 
+  describe('validateApprovalRequired', () => {
+    it('should fail when code-tier mod has no approval callback', () => {
+      const mod = makeMod('code', 'src/test.ts');
+      const result = safety.validateApprovalRequired([mod], {});
+      expect(result.passed).toBe(false);
+      expect(result.message).toContain('approval callback');
+    });
+
+    it('should pass when code-tier mod has approval callback', () => {
+      const mod = makeMod('code', 'src/test.ts');
+      const result = safety.validateApprovalRequired([mod], {
+        approvalCallback: async () => true,
+      });
+      expect(result.passed).toBe(true);
+    });
+
+    it('should pass for parameter-tier mods without approval callback', () => {
+      const mod = makeMod('parameter', 'config/settings.json');
+      const result = safety.validateApprovalRequired([mod], {});
+      expect(result.passed).toBe(true);
+    });
+
+    it('should pass for prompt-tier mods without approval callback', () => {
+      const mod: Modification = {
+        tier: 'prompt',
+        targetFile: 'prompts/system.txt',
+        change: {
+          type: 'prompt',
+          section: 'intro',
+          oldText: 'hello',
+          newText: 'hi there',
+        },
+      };
+      const result = safety.validateApprovalRequired([mod], {});
+      expect(result.passed).toBe(true);
+    });
+
+    it('should pass for empty modifications without approval callback', () => {
+      const result = safety.validateApprovalRequired([], {});
+      expect(result.passed).toBe(true);
+    });
+  });
+
   describe('autoRevert', () => {
     it('should checkout main and delete branch', async () => {
       const { execSync } = await import('node:child_process');

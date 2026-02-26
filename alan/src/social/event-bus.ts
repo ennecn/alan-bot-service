@@ -4,24 +4,50 @@
 
 import { randomUUID } from 'node:crypto';
 import type { EventBusDB } from './event-bus-db.js';
+import type { AgentRegistry } from './agent-registry.js';
 import type { SocialEvent, EventType } from './types.js';
 
 const PENDING_CAP = 500;
 
 export class EventBus {
   private subscribers = new Map<string, Set<(event: SocialEvent) => void>>();
+  private registry: AgentRegistry | null;
 
-  constructor(private db: EventBusDB) {}
+  constructor(private db: EventBusDB, registry?: AgentRegistry) {
+    this.registry = registry ?? null;
+  }
 
   publish(
     event: Omit<SocialEvent, 'id' | 'created_at' | 'delivered_at'>,
   ): SocialEvent {
+    // Validate target agent exists and is online
+    if (event.target_agent && this.registry) {
+      const target = this.registry.getAgent(event.target_agent);
+      if (!target) {
+        throw new Error(`Target agent '${event.target_agent}' not found`);
+      }
+      if (target.status !== 'online') {
+        throw new Error(
+          `Target agent '${event.target_agent}' is ${target.status}, must be online`,
+        );
+      }
+    }
+
     const full: SocialEvent = {
       ...event,
       id: randomUUID(),
       created_at: new Date().toISOString(),
       delivered_at: null,
     };
+
+    // Enforce PENDING_CAP: drop oldest pending events (FIFO) to make room
+    if (full.target_agent) {
+      const pendingCount = this.db.getPendingCount(full.target_agent);
+      if (pendingCount >= PENDING_CAP) {
+        const overflow = pendingCount - PENDING_CAP + 1;
+        this.db.deleteOldestPending(full.target_agent, overflow);
+      }
+    }
 
     this.db.insertEvent(full);
 

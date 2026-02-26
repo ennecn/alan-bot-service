@@ -3,7 +3,11 @@
  */
 import { execSync } from 'node:child_process';
 import path from 'node:path';
-import type { Modification, SafetyCheck, IterationConfig } from './types.js';
+import type {
+  Modification,
+  SafetyCheck,
+  IterationConfig,
+} from './types.js';
 
 /** Files that must never be modified by auto-iteration */
 const CRITICAL_FILES = new Set([
@@ -176,6 +180,29 @@ export class SafetySystem {
         message: `Auto-revert failed: ${message}`,
       };
     }
+  }
+
+  /**
+   * Validate that code-tier modifications have an approval callback configured.
+   */
+  validateApprovalRequired(
+    modifications: Modification[],
+    config: Pick<IterationConfig, 'approvalCallback'>,
+  ): SafetyCheck {
+    const hasCodeMods = modifications.some((m) => m.tier === 'code');
+    if (hasCodeMods && !config.approvalCallback) {
+      return {
+        passed: false,
+        tier: 1,
+        message:
+          'Code-tier modification requires an approval callback, but none is configured',
+      };
+    }
+    return {
+      passed: true,
+      tier: 1,
+      message: 'Approval requirement check passed',
+    };
   }
 
   /**

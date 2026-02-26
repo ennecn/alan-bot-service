@@ -33,6 +33,8 @@ export interface IterationConfig {
   };
   /** Dry run mode — don't actually modify files */
   dryRun?: boolean;
+  /** Approval callback for code-tier modifications. If absent, code modifications are skipped. */
+  approvalCallback?: (modification: Modification) => Promise<boolean>;
 }
 
 export interface AnalysisReport {

@@ -6,6 +6,16 @@ import type { TestPlan, TestResult } from './types.js';
 import { sendMessage as sendAlanMessage } from './alan-client.js';
 import type { AlanClientConfig } from './alan-client.js';
 
+/**
+ * Parse a time jump instruction from a Director message.
+ * Returns the number of hours to jump, or null if not a time jump.
+ */
+export function parseTimeJump(message: string): number | null {
+  const match = message.match(/^\[TIME_JUMP:\s*(\d+)\s*hours?\]$/);
+  if (!match) return null;
+  return parseInt(match[1], 10);
+}
+
 export interface RunnerConfig {
   alanConfig: AlanClientConfig;
   parallel?: number;
@@ -46,9 +56,24 @@ async function runSingleCase(
 
   try {
     const replies: TestResult['replies'] = [];
+    let currentTimestamp = Date.now();
 
     // Read card file to use as system prompt
     for (const prompt of testCase.prompts) {
+      // Check if this prompt is a time jump instruction
+      const jumpHours = parseTimeJump(prompt);
+      if (jumpHours !== null) {
+        // Advance internal timestamp; don't send to Alan/ST
+        currentTimestamp += jumpHours * 3600_000;
+        replies.push({
+          prompt,
+          reply: `[TIME_ADVANCED: ${jumpHours} hours, now ${new Date(currentTimestamp).toISOString()}]`,
+          latency_ms: 0,
+          tokens: { input: 0, output: 0 },
+        });
+        continue;
+      }
+
       const response = await withTimeout(
         sendAlanMessage(prompt, config.alanConfig, undefined),
         timeout,

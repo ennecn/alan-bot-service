@@ -42,7 +42,7 @@ import type { CardData } from '../card-import/mapper.js';
 export class Pipeline {
   private mutex = new Mutex();
   private s2Queue = new S2Queue();
-  private memoryQueue = new MemoryQueue();
+  readonly memoryQueue = new MemoryQueue();
   private emotionStore = new EmotionStateStore();
   private metricsWriter: MetricsWriter;
   private cardDataCache: { data: CardData | null; loaded: boolean } = { data: null, loaded: false };
@@ -178,10 +178,12 @@ export class Pipeline {
       session_start: emotionBefore.session_start,
     };
 
-    // Write IMPULSE.md + emotion_state.md
+    // Write IMPULSE.md + emotion_state.md (serialized through memory queue)
     const newImpulseMd = `# Impulse\n\nvalue: ${impulse.value.toFixed(3)}\nfired: ${impulse.fired}\ndecision: ${decision}\nnarrative: ${system1Output.impulse_narrative}\n`;
-    fs.writeFileSync(impulseMdPath, newImpulseMd, 'utf-8');
-    this.emotionStore.write(this.config.workspace_path, newSnapshot);
+    await this.memoryQueue.enqueue(async () => {
+      fs.writeFileSync(impulseMdPath, newImpulseMd, 'utf-8');
+      this.emotionStore.write(this.config.workspace_path, newSnapshot);
+    });
 
     // (l) Branch on decision
     let reply: string | undefined;

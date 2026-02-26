@@ -39,6 +39,12 @@ export interface CardIndex {
   };
 }
 
+export interface TimeJumpInstruction {
+  type: 'time_jump';
+  hours: number;
+  narrative?: string;
+}
+
 // --- Test Runner Types (used by Stream 2) ---
 
 export interface TestCase {

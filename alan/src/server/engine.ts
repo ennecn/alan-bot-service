@@ -45,7 +45,7 @@ export class AlanEngine {
     // Action Dispatcher
     this.dispatcher = new ActionDispatcher(config.workspace_path);
     this.dispatcher.registerAdapter(new DeliveryAdapter());
-    this.dispatcher.registerAdapter(new MemoryAdapter(config.workspace_path));
+    this.dispatcher.registerAdapter(new MemoryAdapter(config.workspace_path, this.pipeline.memoryQueue));
     this.dispatcher.registerAdapter(new EventBusAdapter(config.event_bus_url, config.agent_id));
 
     console.log(`[alan-engine] initialized for agent "${config.agent_id}" at ${config.workspace_path}`);

@@ -52,6 +52,30 @@ export class Notifier {
   }
 
   /**
+   * Notify that an iteration requires human approval for code modifications.
+   */
+  async approvalRequired(
+    iteration: number,
+    hypothesis: Hypothesis,
+  ): Promise<void> {
+    const codeMods = hypothesis.modifications.filter(
+      (m) => m.tier === 'code',
+    );
+    const msg = [
+      `\u{1F6A8} <b>Iteration ${iteration} — approval required</b>`,
+      `Tier: code`,
+      `Target: ${hypothesis.targetDimension.replace(/_/g, ' ')}`,
+      `Description: ${hypothesis.description}`,
+      `Code modifications: ${codeMods.length}`,
+      ...codeMods.map(
+        (m) => `  \u2022 ${m.targetFile}`,
+      ),
+    ].join('\n');
+
+    await this.notify(msg);
+  }
+
+  /**
    * Notify that an iteration has completed.
    */
   async iterationCompleted(result: IterationResult): Promise<void> {

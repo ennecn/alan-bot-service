@@ -87,6 +87,46 @@ describe('LifeSimulation', () => {
     expect(publishSpy).toHaveBeenCalledTimes(0);
   });
 
+  it('economy mode: simulateEvent skips Layer 2 narrative expansion', async () => {
+    const db = new EventBusDB(':memory:');
+    const eventBus = new EventBus(db);
+    const registry = new AgentRegistry(db);
+    const economySim = new LifeSimulation(eventBus, registry, { economyMode: true });
+
+    registry.register('agent-a', 'Alice');
+    registry.register('agent-b', 'Bob');
+
+    const enrichFn = vi.fn(async () => 'LLM-enriched narrative');
+
+    const result = await economySim.simulateEvent('agent-a', 'ate lunch', enrichFn);
+
+    // enrichFn should NOT have been called (Layer 2 skipped)
+    expect(enrichFn).not.toHaveBeenCalled();
+    // Result should keep the skeleton content, not enriched
+    expect(result.content).toBe('ate lunch');
+    // Layer stays at 1 (skeleton) since Layer 2 was skipped
+    expect(result.layer).toBe(1);
+  });
+
+  it('non-economy mode: simulateEvent calls Layer 2 enrichment', async () => {
+    const db = new EventBusDB(':memory:');
+    const eventBus = new EventBus(db);
+    const registry = new AgentRegistry(db);
+    const normalSim = new LifeSimulation(eventBus, registry, { economyMode: false });
+
+    registry.register('agent-a', 'Alice');
+    registry.register('agent-b', 'Bob');
+
+    const enrichFn = vi.fn(async () => 'Had warm ramen at the corner shop');
+
+    const result = await normalSim.simulateEvent('agent-a', 'ate lunch', enrichFn);
+
+    // enrichFn SHOULD have been called (Layer 2 active)
+    expect(enrichFn).toHaveBeenCalledOnce();
+    expect(result.content).toBe('Had warm ramen at the corner shop');
+    expect(result.layer).toBe(2);
+  });
+
   it('generateDailySchedule creates skeleton events for a day', () => {
     const { lifeSim } = setup();
     const schedule = lifeSim.generateDailySchedule('agent-a');

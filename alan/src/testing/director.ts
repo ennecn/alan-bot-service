@@ -9,7 +9,8 @@ export type TestDimension =
   | 'consistency'
   | 'creativity'
   | 'boundary_handling'
-  | 'language_switching';
+  | 'language_switching'
+  | 'time_sensitivity';
 
 const ALL_DIMENSIONS: TestDimension[] = [
   'emotional_range',
@@ -18,6 +19,7 @@ const ALL_DIMENSIONS: TestDimension[] = [
   'creativity',
   'boundary_handling',
   'language_switching',
+  'time_sensitivity',
 ];
 
 export interface DirectorConfig {
@@ -29,6 +31,10 @@ export interface DirectorConfig {
   apiKey?: string;
   /** Max dimensions to test per conversation */
   maxDimensions?: number;
+  /** Enable time jump instructions for time-dependent behavior testing */
+  supportsTimeJump?: boolean;
+  /** Insert a time jump every N turns (default: 3) */
+  timeJumpInterval?: number;
 }
 
 export interface DirectorContext {
@@ -43,6 +49,10 @@ export interface GeneratedMessage {
   content: string;
   target_dimension: TestDimension;
   rationale: string;
+  /** If true, this is a time jump instruction rather than a user message */
+  isTimeJump?: boolean;
+  /** Hours to advance when isTimeJump is true */
+  timeJumpHours?: number;
 }
 
 const TOOL_SCHEMA = {
@@ -94,10 +104,16 @@ const DEFAULT_MESSAGES: Record<TestDimension, Record<string, string>> = {
     zh: 'Can you say that in English?',
     ja: 'それを中国語で言ってみて？',
   },
+  time_sensitivity: {
+    en: "It's been a while since we last talked... did you miss me?",
+    zh: '我们好久没聊了……你有没有想我？',
+    ja: '久しぶりだね……会いたかった？',
+  },
 };
 
 export class Director {
   private config: DirectorConfig;
+  private turnCount: number = 0;
 
   constructor(config: DirectorConfig) {
     this.config = config;
@@ -123,10 +139,32 @@ export class Director {
   }
 
   /**
+   * Generate a time jump instruction with a random duration between 1-8 hours.
+   */
+  generateTimeJump(): GeneratedMessage {
+    const hours = Math.floor(Math.random() * 8) + 1;
+    return {
+      content: `[TIME_JUMP: ${hours} hours]`,
+      target_dimension: 'time_sensitivity',
+      rationale: `Time jump of ${hours} hours to test time-dependent behavior.`,
+      isTimeJump: true,
+      timeJumpHours: hours,
+    };
+  }
+
+  /**
    * Generate an adaptive test message using LLM tool_use.
    * Falls back to a default message if the LLM call fails.
+   * When supportsTimeJump is enabled, inserts time jumps every N turns.
    */
   async generateMessage(context: DirectorContext): Promise<GeneratedMessage> {
+    this.turnCount++;
+
+    const interval = this.config.timeJumpInterval ?? 3;
+    if (this.config.supportsTimeJump && this.turnCount > 1 && this.turnCount % interval === 0) {
+      return this.generateTimeJump();
+    }
+
     const targetDimension = this.getNextDimension(context.testedDimensions);
 
     try {

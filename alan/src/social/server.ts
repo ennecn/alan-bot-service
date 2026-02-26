@@ -12,18 +12,43 @@ import { FactSync } from './fact-sync.js';
 import { LifeSimulation } from './life-simulation.js';
 import type { EventType } from './types.js';
 
-export function createSocialServer(dbPath?: string) {
-  const resolvedDbPath = dbPath ?? process.env.ALAN_SOCIAL_DB ?? './social.db';
+export interface SocialServerOptions {
+  dbPath?: string;
+  /** Map of API key → agent ID for authentication. If provided, all routes except /health require X-EventBus-Key header. */
+  apiKeys?: Map<string, string>;
+}
+
+export function createSocialServer(opts: SocialServerOptions | string = {}) {
+  // Support legacy string-only signature
+  const options: SocialServerOptions = typeof opts === 'string' ? { dbPath: opts } : opts;
+  const resolvedDbPath = options.dbPath ?? process.env.ALAN_SOCIAL_DB ?? './social.db';
   const port = parseInt(process.env.ALAN_SOCIAL_PORT ?? '8099', 10);
+  const apiKeys = options.apiKeys;
 
   const eventBusDb = new EventBusDB(resolvedDbPath);
-  const eventBus = new EventBus(eventBusDb);
   const registry = new AgentRegistry(eventBusDb);
+  const eventBus = new EventBus(eventBusDb, registry);
   const platform = new SocialPlatform(resolvedDbPath);
   const factSync = new FactSync(eventBus);
   const lifeSim = new LifeSimulation(eventBus, registry);
 
-  const app = new Hono();
+  type Env = { Variables: { authenticatedAgent: string } };
+  const app = new Hono<Env>();
+
+  // --- Auth Middleware ---
+  if (apiKeys) {
+    app.use('*', async (c, next) => {
+      // Skip auth for health endpoint
+      if (c.req.path === '/health') return next();
+
+      const key = c.req.header('x-eventbus-key');
+      if (!key || !apiKeys.has(key)) {
+        return c.json({ error: 'unauthorized' }, 401);
+      }
+      c.set('authenticatedAgent', apiKeys.get(key)!);
+      return next();
+    });
+  }
 
   // --- Events ---
 
@@ -34,13 +59,18 @@ export function createSocialServer(dbPath?: string) {
       type: EventType;
       payload: Record<string, unknown>;
     }>();
-    const event = eventBus.publish({
-      source_agent: body.source_agent,
-      target_agent: body.target_agent ?? null,
-      type: body.type,
-      payload: body.payload,
-    });
-    return c.json(event, 201);
+    try {
+      const event = eventBus.publish({
+        source_agent: body.source_agent,
+        target_agent: body.target_agent ?? null,
+        type: body.type,
+        payload: body.payload,
+      });
+      return c.json(event, 201);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 422);
+    }
   });
 
   app.get('/events/poll/:agentId', (c) => {
