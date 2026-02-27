@@ -234,18 +234,23 @@ export class Pipeline {
         impulseMd: newImpulseMd,
         emotionNarrative,
         activatedWI,
-        chatHistory: this.chatHistory
-          ? (() => {
-              const sessionId = this.chatHistory.getOrCreateSession(
-                emotionBefore.last_interaction,
-                this.config.session_timeout_hours,
-              );
-              return this.chatHistory.getRecent(sessionId, 50).reverse().map(m => ({
-                role: m.role,
-                content: m.content,
-              }));
-            })()
-          : [],
+        chatHistory: (() => {
+          const history = this.chatHistory
+            ? (() => {
+                const sessionId = this.chatHistory.getOrCreateSession(
+                  emotionBefore.last_interaction,
+                  this.config.session_timeout_hours,
+                );
+                return this.chatHistory.getRecent(sessionId, 50).reverse().map(m => ({
+                  role: m.role,
+                  content: m.content,
+                }));
+              })()
+            : [];
+          // Append current user message — it hasn't been written to the store yet
+          history.push({ role: 'user', content: event.content });
+          return history;
+        })(),
         postHistoryInstructions: cardData?.post_history_instructions ?? '',
       });
 
