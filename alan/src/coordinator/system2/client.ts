@@ -64,13 +64,20 @@ async function doCall(
     headers['x-api-key'] = config.apiKey;
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     model: config.model,
     max_tokens: config.maxTokens,
     system: prompt.system,
     messages: prompt.messages,
     stream: true,
   };
+  if (config.sampler) {
+    if (config.sampler.temperature !== undefined) body.temperature = config.sampler.temperature;
+    if (config.sampler.top_p !== undefined) body.top_p = config.sampler.top_p;
+    if (config.sampler.top_k !== undefined) body.top_k = config.sampler.top_k;
+    if (config.sampler.frequency_penalty !== undefined) body.frequency_penalty = config.sampler.frequency_penalty;
+    if (config.sampler.presence_penalty !== undefined) body.presence_penalty = config.sampler.presence_penalty;
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), S2_TIMEOUT_MS);

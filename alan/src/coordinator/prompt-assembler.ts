@@ -6,6 +6,7 @@
  */
 
 import type { WIEntry } from '../types/actions.js';
+import type { DepthInjection } from '../preset-import/types.js';
 
 export interface AssemblyParams {
   systemPrompt: string;
@@ -19,6 +20,10 @@ export interface AssemblyParams {
   postHistoryInstructions: string;
   maxContextTokens?: number;
   outputReserve?: number;
+  presetSystemPrefix?: string;
+  presetPostHistory?: string;
+  depthInjections?: DepthInjection[];
+  assistantPrefill?: string;
 }
 
 interface AnthropicMessage {
@@ -28,6 +33,7 @@ interface AnthropicMessage {
 
 // Token budget defaults
 const L1_BUDGET = 4_000;
+const PRESET_BUDGET = 4_000;
 const L2_BUDGET = 8_000;
 const L3_BUDGET_MIN = 8_000;
 const L3_BUDGET_MAX = 16_000;
@@ -78,6 +84,11 @@ export function assemble(params: AssemblyParams): { system: string; messages: An
   // L1: system_prompt (truncate to budget)
   const l1 = truncateToTokens(params.systemPrompt, L1_BUDGET);
 
+  // Preset prefix: style guide blocks between L1 and L2
+  const presetPrefix = params.presetSystemPrefix
+    ? truncateToTokens(params.presetSystemPrefix, PRESET_BUDGET)
+    : '';
+
   // L2: SOUL.md + mes_example + constant WI
   const mesExTruncated = truncateMesExample(params.mesExample, MES_EXAMPLE_LIMIT);
   const constantWIText = formatWIEntries(params.constantWI);
@@ -90,8 +101,8 @@ export function assemble(params: AssemblyParams): { system: string; messages: An
   const l3Budget = Math.min(L3_BUDGET_MAX, Math.max(L3_BUDGET_MIN, estimateTokens(l3Parts.join('\n\n'))));
   const l3 = truncateToTokens(l3Parts.join('\n\n'), l3Budget);
 
-  // System prompt = L1 + L2 + L3
-  const system = [l1, l2, l3].filter(Boolean).join('\n\n---\n\n');
+  // System prompt = L1 + preset_prefix + L2 + L3
+  const system = [l1, presetPrefix, l2, l3].filter(Boolean).join('\n\n---\n\n');
 
   // L4: chat history + post_history_instructions (remainder budget)
   const usedTokens = estimateTokens(system) + outputReserve;
@@ -123,14 +134,36 @@ export function assemble(params: AssemblyParams): { system: string; messages: An
     });
   }
 
-  // Append post_history_instructions as final user message
-  if (params.postHistoryInstructions) {
+  // Depth injections: splice into message history at specified depths
+  if (params.depthInjections?.length) {
+    const sorted = [...params.depthInjections].sort((a, b) => b.depth - a.depth);
+    for (const inj of sorted) {
+      const insertIdx = Math.max(0, messages.length - inj.depth);
+      messages.splice(insertIdx, 0, {
+        role: inj.role === 'assistant' ? 'assistant' : 'user',
+        content: inj.content,
+      });
+    }
+  }
+
+  // Merge post_history: card PHI first (priority), then preset post_history
+  const finalPHI = [
+    params.postHistoryInstructions,
+    params.presetPostHistory,
+  ].filter(Boolean).join('\n\n');
+
+  if (finalPHI) {
     const last = messages[messages.length - 1];
     if (last && last.role === 'user') {
-      last.content += '\n\n' + params.postHistoryInstructions;
+      last.content += '\n\n' + finalPHI;
     } else {
-      messages.push({ role: 'user', content: params.postHistoryInstructions });
+      messages.push({ role: 'user', content: finalPHI });
     }
+  }
+
+  // Assistant prefill: final assistant message to force continuation
+  if (params.assistantPrefill) {
+    messages.push({ role: 'assistant', content: params.assistantPrefill });
   }
 
   return { system, messages };

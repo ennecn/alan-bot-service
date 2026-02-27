@@ -38,6 +38,8 @@ import { getEmbedding } from '../embedding/client.js';
 import type { EmbeddingConfig } from '../embedding/client.js';
 import { assemble } from './prompt-assembler.js';
 import type { CardData } from '../card-import/mapper.js';
+import type { AlanPreset } from '../preset-import/types.js';
+import { expandMacros } from '../preset-import/macros.js';
 
 export class Pipeline {
   private mutex = new Mutex();
@@ -46,6 +48,7 @@ export class Pipeline {
   private emotionStore = new EmotionStateStore();
   private metricsWriter: MetricsWriter;
   private cardDataCache: { data: CardData | null; loaded: boolean } = { data: null, loaded: false };
+  private presetCache: { data: AlanPreset | null; loaded: boolean } = { data: null, loaded: false };
 
   constructor(
     private config: AlanConfig,
@@ -65,6 +68,18 @@ export class Pipeline {
       this.cardDataCache = { data: null, loaded: true };
     }
     return this.cardDataCache.data;
+  }
+
+  private loadPreset(): AlanPreset | null {
+    if (this.presetCache.loaded) return this.presetCache.data;
+    const presetPath = path.join(this.config.workspace_path, 'internal', 'preset.json');
+    try {
+      const raw = fs.readFileSync(presetPath, 'utf-8');
+      this.presetCache = { data: JSON.parse(raw) as AlanPreset, loaded: true };
+    } catch {
+      this.presetCache = { data: null, loaded: true };
+    }
+    return this.presetCache.data;
   }
 
   async run(event: CoordinatorEvent): Promise<ActionList> {
@@ -225,6 +240,10 @@ export class Pipeline {
       const soulMdPath = path.join(this.config.workspace_path, 'SOUL.md');
       const soulMd = readFileOr(soulMdPath, '');
       const cardData = this.loadCardData();
+      const preset = this.loadPreset();
+
+      const charName = cardData?.character_name ?? '';
+      const userName = (event.metadata?.user_name as string) ?? 'User';
 
       const assembled = assemble({
         systemPrompt: cardData?.system_prompt ?? '',
@@ -252,6 +271,16 @@ export class Pipeline {
           return history;
         })(),
         postHistoryInstructions: cardData?.post_history_instructions ?? '',
+        presetSystemPrefix: preset?.system_prefix
+          ? expandMacros(preset.system_prefix, charName, userName) : undefined,
+        presetPostHistory: preset?.post_history
+          ? expandMacros(preset.post_history, charName, userName) : undefined,
+        depthInjections: preset?.depth_injections?.map(d => ({
+          ...d, content: expandMacros(d.content, charName, userName),
+        })),
+        assistantPrefill: preset?.assistant_prefill
+          ? expandMacros(preset.assistant_prefill, charName, userName) : undefined,
+        maxContextTokens: preset?.max_context_tokens,
       });
 
       // System 2 call via serial queue
@@ -259,7 +288,8 @@ export class Pipeline {
         baseUrl: this.config.system2_base_url,
         model: this.config.system2_model,
         apiKey: this.config.s2_api_key,
-        maxTokens: this.config.s2_max_tokens,
+        maxTokens: preset?.max_output_tokens ?? this.config.s2_max_tokens,
+        sampler: preset?.sampler,
       };
       const s2Start = Date.now();
       const s2Result = await this.s2Queue.enqueue(async () => {
