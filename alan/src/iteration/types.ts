@@ -35,6 +35,12 @@ export interface IterationConfig {
   dryRun?: boolean;
   /** Approval callback for code-tier modifications. If absent, code modifications are skipped. */
   approvalCallback?: (modification: Modification) => Promise<boolean>;
+  /** Alan Engine base URL for evaluation (e.g. http://127.0.0.1:7088) */
+  alanBaseUrl?: string;
+  /** Card index for fast test selection */
+  cardIndex?: import('../testing/types.js').CardIndex;
+  /** Number of cards for evaluation fast test (default 5) */
+  evalCardCount?: number;
 }
 
 export interface AnalysisReport {

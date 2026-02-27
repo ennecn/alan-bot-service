@@ -13,6 +13,9 @@ import { HypothesisGenerator } from './hypothesis.js';
 import { Modifier } from './modifier.js';
 import { SafetySystem } from './safety.js';
 import { Notifier } from './notifier.js';
+import { runFastTest } from '../testing/fast-test.js';
+import { Judge } from '../testing/judge.js';
+import type { JudgeInput } from '../testing/judge.js';
 
 export class IterationEngine {
   private config: IterationConfig;
@@ -306,7 +309,7 @@ export class IterationEngine {
   /**
    * Evaluate current state by generating new verdicts.
    * In dry run: simulates a small random improvement.
-   * In real mode: placeholder that returns passed verdicts.
+   * In real mode: runs fast test + judge to get actual scores.
    */
   private async evaluateIteration(
     currentVerdicts: JudgeVerdictLike[],
@@ -335,8 +338,51 @@ export class IterationEngine {
       });
     }
 
-    // Real mode: would run test suite + judge
-    // For now, return current verdicts (no change)
-    return currentVerdicts;
+    // Real mode: run fast test + judge
+    if (!this.config.cardIndex || !this.config.alanBaseUrl) {
+      console.warn('[engine] No cardIndex or alanBaseUrl — returning current verdicts unchanged');
+      return currentVerdicts;
+    }
+
+    const fastResult = await runFastTest({
+      cardIndex: this.config.cardIndex,
+      alanConfig: { baseUrl: this.config.alanBaseUrl },
+      cardCount: this.config.evalCardCount ?? 5,
+    });
+
+    if (fastResult.total === 0) {
+      return currentVerdicts;
+    }
+
+    const judge = new Judge({
+      llmBaseUrl: this.config.llmBaseUrl,
+      llmModel: this.config.llmModel,
+      apiKey: this.config.apiKey,
+      consensusCount: 1, // Single judge call per card for speed
+    });
+
+    const verdicts: JudgeVerdictLike[] = [];
+    for (const tr of fastResult.results) {
+      if (!tr.success || tr.replies.length === 0) continue;
+      const lastReply = tr.replies[tr.replies.length - 1];
+      const input: JudgeInput = {
+        characterName: tr.card_name,
+        characterDescription: '', // Card description not in TestResult — judge works from reply alone
+        conversationHistory: tr.replies.map((r) => [
+          { role: 'user' as const, content: r.prompt },
+          { role: 'assistant' as const, content: r.reply },
+        ]).flat(),
+        replyToEvaluate: lastReply.reply,
+        expectedLanguage: 'auto',
+      };
+      const verdict = await judge.evaluate(input, tr.case_index);
+      verdicts.push({
+        scores: verdict.scores,
+        overall: verdict.overall,
+        notes: verdict.notes,
+      });
+    }
+
+    return verdicts.length > 0 ? verdicts : currentVerdicts;
   }
 }
