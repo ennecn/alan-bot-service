@@ -1,6 +1,7 @@
 export interface EmbeddingConfig {
   baseUrl: string;
   model?: string;
+  apiKey?: string;
 }
 
 /**
@@ -13,9 +14,11 @@ export async function getEmbedding(
 ): Promise<number[] | null> {
   try {
     const url = `${config.baseUrl.replace(/\/$/, '')}/v1/embeddings`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (config.apiKey) headers['Authorization'] = `Bearer ${config.apiKey}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         input: text,
         model: config.model ?? 'BAAI/bge-m3',
@@ -46,9 +49,11 @@ export async function batchEmbed(
 
   try {
     const url = `${config.baseUrl.replace(/\/$/, '')}/v1/embeddings`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (config.apiKey) headers['Authorization'] = `Bearer ${config.apiKey}`;
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         input: texts,
         model: config.model ?? 'BAAI/bge-m3',

@@ -98,7 +98,7 @@ export async function callSystem1(
     system,
     messages,
     tools: [PROCESS_EVENT_TOOL],
-    tool_choice: { type: 'tool', name: 'process_event' },
+    tool_choice: { type: 'auto' },
   };
 
   const headers: Record<string, string> = {
@@ -109,11 +109,20 @@ export async function callSystem1(
     headers['x-api-key'] = config.apiKey;
   }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     return null;

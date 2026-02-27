@@ -98,7 +98,11 @@ export class Pipeline {
       ? this.wiStore.getAllEntries().filter(e => e.enabled !== false)
       : [];
 
-    const embeddingConfig: EmbeddingConfig = { baseUrl: this.config.embedding_url };
+    const embeddingConfig: EmbeddingConfig = {
+      baseUrl: this.config.embedding_url,
+      apiKey: this.config.embedding_api_key,
+      model: this.config.embedding_model,
+    };
     const queryEmbedding = event.content
       ? await getEmbedding(event.content, embeddingConfig)
       : null;

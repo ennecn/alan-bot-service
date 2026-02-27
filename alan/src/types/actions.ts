@@ -132,6 +132,10 @@ export interface AlanConfig {
   system2_model: string;
   /** Embedding proxy URL */
   embedding_url: string;
+  /** Embedding API key (optional — omit if proxy handles auth) */
+  embedding_api_key?: string;
+  /** Embedding model name (default 'BAAI/bge-m3') */
+  embedding_model?: string;
   /** Event Bus URL */
   event_bus_url: string;
   /** Event Bus API key for this agent */
