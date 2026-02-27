@@ -31,6 +31,7 @@ process.env.ALAN_EMBEDDING_API_KEY = 'sk-qylxcddwteqbqdmptzhtxhqlgyhmcgwlszaybqi
 process.env.ALAN_EMBEDDING_MODEL = 'Qwen/Qwen3-Embedding-4B';
 process.env.ALAN_CHARACTER_LANGUAGE = 'zh';
 process.env.ALAN_S2_MAX_TOKENS = '2000';
+process.env.ALAN_FIRE_THRESHOLD = '0.3'; // Lower for testing — always reply
 
 async function main() {
   // Step 1: Import card
