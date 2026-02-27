@@ -31,6 +31,8 @@ export interface EmotionSnapshot {
   suppression: SuppressionFatigue;
   last_interaction: string; // ISO timestamp
   session_start: string;    // ISO timestamp
+  directive_history?: string[]; // last 3 writeDirective pattern IDs (PRD §2.1.5)
+  banned_word_streak?: Record<string, number>; // consecutive hit count per banned word (PRD §2.3.3)
 }
 
 // ============================================================

@@ -50,5 +50,10 @@ export function loadConfig(): AlanConfig {
       || env('ALAN_S1_MODEL', 'gemini-2.5-flash'),
     import_llm_api_key: process.env.ALAN_IMPORT_LLM_API_KEY
       || process.env.ALAN_S1_API_KEY || undefined,
+    output_style: (process.env.ALAN_OUTPUT_STYLE as 'default' | 'casual' | undefined) ?? undefined,
+    disabled_guards: process.env.ALAN_DISABLED_GUARDS
+      ? process.env.ALAN_DISABLED_GUARDS.split(',').map(s => s.trim()).filter(Boolean)
+      : undefined,
+    sampling_preset: (process.env.ALAN_SAMPLING_PRESET as 'balanced' | 'creative' | 'controlled' | undefined) ?? undefined,
   };
 }

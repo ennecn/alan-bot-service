@@ -37,6 +37,13 @@ export function buildSystem1Prompt(params: System1PromptParams): System1PromptRe
     `- Write impulse_narrative in ${langLabel} — this is the character's current impulse state.`,
     '- Decide if this event is worth saving to long-term memory.',
     '',
+    '## Output Quality',
+    'For impulse_narrative:',
+    '- Use concrete physical actions and sensations, not abstract emotional labels.',
+    '- Banned expressions: "某种", "难以言表", "涌上来", "涌上心头", "胸腔共鸣", "心中涌起"',
+    '- Write as the character\'s inner monologue in first person, not a narrator\'s commentary.',
+    '- Ground feelings in specific physical details: temperature, texture, muscle tension, breathing pattern.',
+    '',
     '## Output',
     'You MUST call the process_event tool with your analysis. Do not output plain text.',
   ].join('\n');

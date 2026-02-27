@@ -22,6 +22,7 @@ export interface CardData {
   mes_example: string;
   character_name: string;
   detected_language: string;
+  output_style?: 'default' | 'casual';
 }
 
 export interface MapResult {

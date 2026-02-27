@@ -59,6 +59,22 @@ export interface CoordinatorMetrics {
   };
   degraded: boolean;
   extraction_fallback?: boolean;
+  // Quality layer metrics (PRD §2.3.2)
+  quality_layer_tokens?: number;
+  quality_layer_degraded?: boolean;
+  write_directive?: string;
+  write_directive_pattern?: string;
+  output_style?: string;
+  banned_word_hits?: number;
+  banned_words_found?: string[];
+  s1_banned_word_sanitized?: boolean;
+  write_directive_debug?: {
+    guard_fired: string | null;
+    candidates: string[];
+    tie_break: string | null;
+    variant_index: number;
+    suppression_skipped: boolean;
+  };
 }
 
 // ============================================================
@@ -166,4 +182,10 @@ export interface AlanConfig {
   import_llm_model?: string;
   /** API key for card import LLM (falls back to s1_api_key) */
   import_llm_api_key?: string;
+  /** Writing quality output style — 'default' injects quality rules, 'casual' skips them (PRD §2.1.3) */
+  output_style?: 'default' | 'casual';
+  /** Guard IDs to disable (PRD §2.2.1) */
+  disabled_guards?: string[];
+  /** Sampling preset for S2 (PRD §2.3.1) */
+  sampling_preset?: 'balanced' | 'creative' | 'controlled';
 }

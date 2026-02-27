@@ -37,6 +37,10 @@ export class EmotionStateStore {
     for (const dim of EMOTION_DIMS) {
       if (Math.abs(verified.current[dim] - snapshot.current[dim]) > 0.001) return false;
     }
+    if ((verified.directive_history?.length ?? 0) !== (snapshot.directive_history?.length ?? 0)) return false;
+    const origStreakKeys = Object.keys(snapshot.banned_word_streak ?? {}).length;
+    const verifiedStreakKeys = Object.keys(verified.banned_word_streak ?? {}).length;
+    if (origStreakKeys !== verifiedStreakKeys) return false;
     return true;
   }
 }
@@ -61,6 +65,12 @@ function serializeEmotionMd(s: EmotionSnapshot): string {
     `- last_interaction: ${s.last_interaction}`,
     `- session_start: ${s.session_start}`,
     '',
+    '## Directive History',
+    `- entries: ${(s.directive_history ?? []).slice(-3).join(',')}`,
+    '',
+    '## Banned Word Streak',
+    `- data: ${JSON.stringify(s.banned_word_streak ?? {})}`,
+    '',
   ];
   return lines.join('\n');
 }
@@ -72,7 +82,9 @@ function parseEmotionMd(content: string): EmotionSnapshot | null {
     const suppression = parseSuppressionSection(content);
     const meta = parseMetaSection(content);
     if (!current || !baseline || !suppression || !meta) return null;
-    return { current, baseline, suppression, ...meta };
+    const directiveHistory = parseDirectiveHistorySection(content);
+    const bannedWordStreak = parseBannedWordStreakSection(content);
+    return { current, baseline, suppression, ...meta, directive_history: directiveHistory, banned_word_streak: bannedWordStreak };
   } catch {
     return null;
   }
@@ -120,6 +132,28 @@ function parseMetaSection(content: string): { last_interaction: string; session_
   if (!liMatch || !ssMatch) return null;
 
   return { last_interaction: liMatch[1].trim(), session_start: ssMatch[1].trim() };
+}
+
+function parseDirectiveHistorySection(content: string): string[] {
+  const regex = /## Directive History\n([\s\S]*?)(?=\n##|$)/;
+  const match = content.match(regex);
+  if (!match) return []; // lenient — missing section = empty array
+  const entriesMatch = match[1].match(/- entries:\s*(.*)/);
+  if (!entriesMatch) return [];
+  return entriesMatch[1].trim().split(',').filter(Boolean);
+}
+
+function parseBannedWordStreakSection(content: string): Record<string, number> {
+  const regex = /## Banned Word Streak\n([\s\S]*?)(?=\n##|$)/;
+  const match = content.match(regex);
+  if (!match) return {};
+  const dataMatch = match[1].match(/- data:\s*(.*)/);
+  if (!dataMatch) return {};
+  try {
+    return JSON.parse(dataMatch[1].trim()) as Record<string, number>;
+  } catch {
+    return {};
+  }
 }
 
 function extractNum(block: string, key: string): number | null {

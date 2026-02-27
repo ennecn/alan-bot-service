@@ -19,7 +19,7 @@ import type { System1Config } from './system1/client.js';
 import { callSystem2 } from './system2/client.js';
 import type { System2Config } from './system2/types.js';
 import { updateEmotion, makeEmotionState, makeDefaultHalfLife } from '../emotion/calculator.js';
-import { narrativize } from '../emotion/narrativizer.js';
+import { narrativize, writeDirective } from '../emotion/narrativizer.js';
 import { calculateImpulse } from '../impulse/calculator.js';
 import { decideBehavior } from '../impulse/decision.js';
 import { preFilter } from '../wi-engine/pre-filter.js';
@@ -36,10 +36,13 @@ import type { WIStore } from '../storage/wi-store.js';
 import type { ChatHistoryStore } from '../storage/chat-history.js';
 import { getEmbedding } from '../embedding/client.js';
 import type { EmbeddingConfig } from '../embedding/client.js';
-import { assemble } from './prompt-assembler.js';
+import { assemble, SAMPLING_PRESETS } from './prompt-assembler.js';
 import type { CardData } from '../card-import/mapper.js';
 import type { AlanPreset } from '../preset-import/types.js';
 import { expandMacros } from '../preset-import/macros.js';
+import { getGuardText } from '../quality/guards.js';
+import { getBannedWordText } from '../quality/banned-words.js';
+import { scanForBannedWords, sanitizeS1Output } from '../quality/post-processor.js';
 
 export class Pipeline {
   private mutex = new Mutex();
@@ -153,6 +156,15 @@ export class Pipeline {
     const s1Degraded = s1Raw === null;
     const s1Ms = Date.now() - s1StartMs;
 
+    // Phase 1: Sanitize S1 impulse_narrative — replace absolute-ban words with [...]
+    const s1Sanitized = sanitizeS1Output(
+      system1Output.impulse_narrative,
+      this.config.character_language,
+    );
+    if (s1Sanitized.replaced) {
+      system1Output.impulse_narrative = s1Sanitized.sanitized;
+    }
+
     // (g) Deterministic emotion calculation
     const emotionAfter = updateEmotion(
       emotionBefore.current,
@@ -164,6 +176,16 @@ export class Pipeline {
 
     // (h) Emotion narrativization
     const emotionNarrative = narrativize(emotionAfter, this.config.character_language);
+
+    // (h2) Writing directive from emotion state (PRD §2.1.5)
+    const directiveResult = writeDirective({
+      state: emotionAfter,
+      language: this.config.character_language,
+      suppressionCount: emotionBefore.suppression.count,
+      lastSuppressTime: emotionBefore.suppression.last_suppress,
+      directiveHistory: emotionBefore.directive_history,
+      sessionTimeoutHours: this.config.session_timeout_hours,
+    });
 
     // (i) Memory consolidation check
     const memoryActions: Array<{ type: 'update_memory'; content: string }> = [];
@@ -188,27 +210,33 @@ export class Pipeline {
     // (k) Behavior decision
     const decision = decideBehavior(impulse, event.trigger, emotionBefore.suppression);
 
-    // Update emotion snapshot
+    // Update emotion snapshot (with directive_history tracking — PRD §2.1.5)
+    const prevHistory = emotionBefore.directive_history ?? [];
+    const newDirectiveHistory = [...prevHistory, directiveResult.patternId].slice(-3);
     const newSnapshot: EmotionSnapshot = {
       current: emotionAfter,
       baseline: emotionBefore.baseline,
       suppression: updateSuppression(emotionBefore.suppression, decision, event.timestamp),
       last_interaction: event.timestamp,
       session_start: emotionBefore.session_start,
+      directive_history: newDirectiveHistory,
+      banned_word_streak: emotionBefore.banned_word_streak ?? {},
     };
 
-    // Write IMPULSE.md + emotion_state.md (serialized through memory queue)
+    // Write IMPULSE.md immediately (doesn't depend on S2 outcome)
     const newImpulseMd = `# Impulse\n\nvalue: ${impulse.value.toFixed(3)}\nfired: ${impulse.fired}\ndecision: ${decision}\nnarrative: ${system1Output.impulse_narrative}\n`;
     await this.memoryQueue.enqueue(async () => {
       fs.writeFileSync(impulseMdPath, newImpulseMd, 'utf-8');
-      this.emotionStore.write(this.config.workspace_path, newSnapshot);
     });
+    // emotion_state.md is written after S2 (post-processor may update banned_word_streak)
 
     // (l) Branch on decision
     let reply: string | undefined;
     let s2Ms: number | null = null;
     let s2Usage: { input_tokens: number; output_tokens: number } | null = null;
     let s2StreamChunks: import('./system2/types.js').System2StreamChunk[] = [];
+    let s2BannedWordHits = 0;
+    let s2BannedWordsFound: string[] = [];
 
     if (decision === 'reply') {
       // WI final activation — combine all 4 signals and apply threshold
@@ -244,6 +272,37 @@ export class Pipeline {
 
       const charName = cardData?.character_name ?? '';
       const userName = (event.metadata?.user_name as string) ?? 'User';
+
+      // Resolve output style: card-data > config > default
+      const resolvedOutputStyle = cardData?.output_style ?? this.config.output_style ?? 'default';
+
+      // Phase 1: Guard text and banned word text for L1 injection
+      const guardResult = resolvedOutputStyle !== 'casual'
+        ? getGuardText(this.config.character_language, this.config.disabled_guards)
+        : null;
+      const bannedWordText = resolvedOutputStyle !== 'casual'
+        ? getBannedWordText(this.config.character_language)
+        : undefined;
+
+      // Phase 2: Reinforcement from previous turn's post-processor streak
+      const prevStreak = emotionBefore.banned_word_streak ?? {};
+      // Reinforcement is carried forward — we don't scan yet (scan happens after S2 reply)
+      // Check if any word hit streak threshold from previous scans
+      const prevReinforcements: string[] = [];
+      for (const [word, count] of Object.entries(prevStreak)) {
+        if (count >= 3) {
+          const templates: Record<string, (w: string, c: number) => string> = {
+            zh: (w, c) => `注意：你已连续${c}次使用「${w}」。此表达被禁止。请使用具体的感官描写代替。`,
+            en: (w, c) => `CRITICAL: You have used '${w}' in ${c} consecutive replies. This expression is banned. Use concrete sensory details instead.`,
+            ja: (w, c) => `注意：「${w}」を${c}回連続使用しています。この表現は禁止です。具体的な感覚描写を使ってください。`,
+          };
+          const tmpl = templates[this.config.character_language] ?? templates.en;
+          prevReinforcements.push(tmpl(word, count));
+        }
+      }
+      const reinforcement = prevReinforcements.length > 0
+        ? prevReinforcements.join('\n')
+        : undefined;
 
       const assembled = assemble({
         systemPrompt: cardData?.system_prompt ?? '',
@@ -281,7 +340,21 @@ export class Pipeline {
         assistantPrefill: preset?.assistant_prefill
           ? expandMacros(preset.assistant_prefill, charName, userName) : undefined,
         maxContextTokens: preset?.max_context_tokens,
+        writingDirective: directiveResult.directive,
+        outputStyle: resolvedOutputStyle,
+        language: this.config.character_language,
+        guardText: guardResult?.text,
+        bannedWordText,
+        reinforcement,
       });
+
+      // Phase 2: Resolve sampling preset (config preset → lookup, merged with card preset)
+      const presetSampler = preset?.sampler;
+      const configSampler = this.config.sampling_preset
+        ? SAMPLING_PRESETS[this.config.sampling_preset]
+        : undefined;
+      // Card preset sampler takes priority over config sampling_preset
+      const resolvedSampler = presetSampler ?? configSampler;
 
       // System 2 call via serial queue
       const s2Config: System2Config = {
@@ -289,7 +362,7 @@ export class Pipeline {
         model: this.config.system2_model,
         apiKey: this.config.s2_api_key,
         maxTokens: preset?.max_output_tokens ?? this.config.s2_max_tokens,
-        sampler: preset?.sampler,
+        sampler: resolvedSampler,
       };
       const s2Start = Date.now();
       const s2Result = await this.s2Queue.enqueue(async () => {
@@ -305,9 +378,27 @@ export class Pipeline {
         }
       }
       reply = s2Result.text;
+
+      // Phase 2: Post-processor — scan S2 output for banned words, update streak
+      if (reply && resolvedOutputStyle !== 'casual') {
+        const postResult = scanForBannedWords(
+          reply,
+          this.config.character_language,
+          newSnapshot.banned_word_streak ?? {},
+        );
+        newSnapshot.banned_word_streak = postResult.updatedStreak;
+        // Store scan results for metrics
+        s2BannedWordHits = postResult.hitCount;
+        s2BannedWordsFound = postResult.wordsFound;
+      }
     }
 
-    // (m) Write metrics
+    // Write emotion_state.md after S2 (post-processor may have updated banned_word_streak)
+    await this.memoryQueue.enqueue(async () => {
+      this.emotionStore.write(this.config.workspace_path, newSnapshot);
+    });
+
+    // (m) Write metrics (including Phase 1+2 quality fields)
     const metrics: CoordinatorMetrics = {
       timestamp: event.timestamp,
       trigger: event.trigger,
@@ -325,6 +416,15 @@ export class Pipeline {
         s2_out: s2Usage?.output_tokens ?? null,
       },
       degraded: s1Degraded,
+      write_directive: directiveResult.directive,
+      write_directive_pattern: directiveResult.patternId,
+      output_style: decision === 'reply'
+        ? (this.loadCardData()?.output_style ?? this.config.output_style ?? 'default')
+        : undefined,
+      banned_word_hits: s2BannedWordHits > 0 ? s2BannedWordHits : undefined,
+      banned_words_found: s2BannedWordsFound.length > 0 ? s2BannedWordsFound : undefined,
+      s1_banned_word_sanitized: s1Sanitized.replaced || undefined,
+      write_directive_debug: directiveResult.debug,
     };
     this.metricsWriter.write(metrics);
 
