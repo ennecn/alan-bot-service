@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.jsonl
+test-workspace/data/internal/
+.env
+.env.*
