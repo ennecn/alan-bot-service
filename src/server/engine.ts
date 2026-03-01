@@ -20,6 +20,7 @@ import { makeEmotionState } from '../emotion/calculator.js';
 import { mapSocialEvent } from '../social/event-mapper.js';
 import type { SocialEvent } from '../social/types.js';
 import type { CardData } from '../card-import/mapper.js';
+import type { ModelEntry } from './routes/models.js';
 
 export class AlanEngine {
   readonly pipeline: Pipeline;
@@ -93,6 +94,24 @@ export class AlanEngine {
     }
 
     return result;
+  }
+
+  /**
+   * Apply a model override at runtime — updates config in-place so the next
+   * pipeline run uses the new model. No restart needed.
+   */
+  applyModelOverride(role: 's1' | 's2', entry: ModelEntry): void {
+    if (role === 's1') {
+      this.config.system1_base_url = entry.base_url;
+      this.config.system1_model = entry.model_id;
+      this.config.s1_api_key = entry.api_key;
+      console.log(`[alan-engine] S1 model switched to "${entry.label}" (${entry.model_id} @ ${entry.base_url})`);
+    } else {
+      this.config.system2_base_url = entry.base_url;
+      this.config.system2_model = entry.model_id;
+      this.config.s2_api_key = entry.api_key;
+      console.log(`[alan-engine] S2 model switched to "${entry.label}" (${entry.model_id} @ ${entry.base_url})`);
+    }
   }
 
   destroy(): void {

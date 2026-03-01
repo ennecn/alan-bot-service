@@ -56,6 +56,30 @@ export class ChatHistoryStore {
     return randomUUID();
   }
 
+  /** Get recent messages across all sessions, ordered by timestamp DESC. */
+  getRecentAll(limit: number): ChatMessage[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM chat_history
+         ORDER BY timestamp DESC
+         LIMIT ?`
+      )
+      .all(limit) as ChatMessage[];
+  }
+
+  /** List distinct sessions with their latest timestamp and message count. */
+  listSessions(limit: number): Array<{ session_id: string; last_message: string; message_count: number }> {
+    return this.db
+      .prepare(
+        `SELECT session_id, MAX(timestamp) as last_message, COUNT(*) as message_count
+         FROM chat_history
+         GROUP BY session_id
+         ORDER BY last_message DESC
+         LIMIT ?`
+      )
+      .all(limit) as Array<{ session_id: string; last_message: string; message_count: number }>;
+  }
+
   /** Move messages older than 30 days to the archive table. */
   archive(): number {
     const cutoff = new Date(Date.now() - 30 * 24 * 3600_000).toISOString();

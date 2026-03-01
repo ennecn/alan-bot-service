@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0a0a0a;
+  --bg-surface: #141414;
+  --bg-elevated: #1c1c1c;
+  --border: #2a2a2a;
+  --border-hover: #3a3a3a;
+  --text: #e5e5e5;
+  --text-muted: #888;
+  --text-dim: #555;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --success: #22c55e;
+  --warning: #eab308;
+  --danger: #ef4444;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+/* Custom badge colors for emotion dimensions */
+.badge-joy { background: #22c55e20; color: #22c55e; border: 1px solid #22c55e40; }
+.badge-sadness { background: #3b82f620; color: #3b82f6; border: 1px solid #3b82f640; }
+.badge-anger { background: #ef444420; color: #ef4444; border: 1px solid #ef444440; }
+.badge-anxiety { background: #eab30820; color: #eab308; border: 1px solid #eab30840; }
+.badge-longing { background: #a855f720; color: #a855f7; border: 1px solid #a855f740; }
+.badge-trust { background: #06b6d420; color: #06b6d4; border: 1px solid #06b6d440; }

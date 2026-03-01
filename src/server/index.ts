@@ -6,6 +6,10 @@ import { healthRoutes } from './routes/health.js';
 import { anthropicRoutes } from './routes/anthropic.js';
 import { debugRoutes } from './routes/debug.js';
 import { adminRoutes } from './routes/admin.js';
+import { modelRoutes } from './routes/models.js';
+import { cardRoutes } from './routes/cards.js';
+import { presetRoutes } from './routes/presets.js';
+import { chatRoutes } from './routes/chat.js';
 
 const config = loadConfig();
 const engine = new AlanEngine(config);
@@ -15,10 +19,14 @@ const publicApp = new Hono();
 publicApp.route('/', healthRoutes(config));
 publicApp.route('/', anthropicRoutes(engine));
 
-// Internal app — binds 127.0.0.1 (debug + admin)
+// Internal app — binds 127.0.0.1 (debug + admin + dashboard APIs)
 const internalApp = new Hono();
 internalApp.route('/', debugRoutes(engine));
 internalApp.route('/', adminRoutes(engine));
+internalApp.route('/', modelRoutes(engine));
+internalApp.route('/', cardRoutes(engine));
+internalApp.route('/', presetRoutes(engine));
+internalApp.route('/', chatRoutes(engine));
 
 const internalPort = config.port + 1;
 

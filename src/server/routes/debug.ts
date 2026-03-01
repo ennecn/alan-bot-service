@@ -43,5 +43,55 @@ export function debugRoutes(engine: AlanEngine) {
     });
   });
 
+  // Aggregated state snapshot — emotion + impulse + wi + card + preset + session
+  app.get('/debug/state', (c) => {
+    const wsPath = engine.config.workspace_path;
+
+    // Emotion
+    const emotion = engine.emotionStore.read(wsPath);
+
+    // Impulse
+    let impulse: string | null = null;
+    const impulsePath = path.join(wsPath, 'IMPULSE.md');
+    try { impulse = fs.readFileSync(impulsePath, 'utf-8'); } catch { /* missing */ }
+
+    // WI count
+    const wiEntries = engine.wiStore.getAllEntries();
+
+    // Card data
+    let cardData: unknown = null;
+    const cardDataPath = path.join(wsPath, 'internal', 'card-data.json');
+    try { cardData = JSON.parse(fs.readFileSync(cardDataPath, 'utf-8')); } catch { /* missing */ }
+
+    // Active preset
+    let preset: unknown = null;
+    const presetPath = path.join(wsPath, 'internal', 'preset.json');
+    try { preset = JSON.parse(fs.readFileSync(presetPath, 'utf-8')); } catch { /* missing */ }
+
+    // Current session
+    const sessions = engine.chatHistory.listSessions(1);
+
+    // Active models
+    let modelRegistry: unknown = null;
+    const modelsPath = path.join(wsPath, 'internal', 'models.json');
+    try { modelRegistry = JSON.parse(fs.readFileSync(modelsPath, 'utf-8')); } catch { /* missing */ }
+
+    return c.json({
+      emotion,
+      impulse,
+      wi: { total: wiEntries.length },
+      card: cardData,
+      preset,
+      session: sessions[0] ?? null,
+      models: {
+        s1: { base_url: engine.config.system1_base_url, model: engine.config.system1_model },
+        s2: { base_url: engine.config.system2_base_url, model: engine.config.system2_model },
+        registry: modelRegistry,
+      },
+      agent_id: engine.config.agent_id,
+      uptime_s: Math.floor(process.uptime()),
+    });
+  });
+
   return app;
 }
