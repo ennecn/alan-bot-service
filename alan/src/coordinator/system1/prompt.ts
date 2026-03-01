@@ -36,6 +36,7 @@ export function buildSystem1Prompt(params: System1PromptParams): System1PromptRe
     '- List any additional World Info entry IDs (from the candidates) that should be activated.',
     `- Write impulse_narrative in ${langLabel} — this is the character's current impulse state.`,
     '- Decide if this event is worth saving to long-term memory.',
+    '- If social context is provided, you may optionally decide to post a moment or react via social_actions. Only post when genuinely motivated.',
     '',
     '## Output Quality',
     'For impulse_narrative:',

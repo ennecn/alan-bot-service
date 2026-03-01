@@ -43,6 +43,7 @@ import { expandMacros } from '../preset-import/macros.js';
 import { getGuardText } from '../quality/guards.js';
 import { getBannedWordText } from '../quality/banned-words.js';
 import { scanForBannedWords, sanitizeS1Output } from '../quality/post-processor.js';
+import { resolveDeliveryMode } from '../action/adapters/delivery-modes.js';
 
 export class Pipeline {
   private mutex = new Mutex();
@@ -196,6 +197,33 @@ export class Pipeline {
       });
     }
 
+    // Social actions from S1
+    const socialActions: import('../types/actions.js').Action[] = [];
+    if (system1Output.social_actions) {
+      const sa = system1Output.social_actions;
+      if (sa.should_post && sa.post_content) {
+        socialActions.push({
+          type: 'post_moment',
+          content: sa.post_content,
+          mood: sa.post_mood ?? 'neutral',
+        });
+      }
+      if (sa.should_react && sa.react_target) {
+        if (sa.react_type === 'comment' && sa.react_content) {
+          socialActions.push({
+            type: 'comment',
+            target: sa.react_target,
+            content: sa.react_content,
+          });
+        } else {
+          socialActions.push({
+            type: 'like',
+            target: sa.react_target,
+          });
+        }
+      }
+    }
+
     // (j) Impulse calculation
     const impulse = calculateImpulse({
       emotionDeltas: system1Output.emotional_interpretation,
@@ -304,6 +332,25 @@ export class Pipeline {
         ? prevReinforcements.join('\n')
         : undefined;
 
+      // Fetch social context if event bus is configured
+      let socialContext: string | undefined;
+      if (this.config.event_bus_url) {
+        try {
+          const res = await fetch(
+            `${this.config.event_bus_url}/posts?agent_id=${this.config.agent_id}&limit=5`,
+          );
+          if (res.ok) {
+            const posts = (await res.json()) as Array<{ agent_id: string; content: string; mood: string; created_at: string }>;
+            if (posts.length > 0) {
+              socialContext = '## Recent Social Activity\n' +
+                posts.map(p => `- ${p.agent_id} (${p.mood}): ${p.content}`).join('\n');
+            }
+          }
+        } catch {
+          // Silent — social layer may be unavailable
+        }
+      }
+
       const assembled = assemble({
         systemPrompt: cardData?.system_prompt ?? '',
         soulMd,
@@ -346,6 +393,7 @@ export class Pipeline {
         guardText: guardResult?.text,
         bannedWordText,
         reinforcement,
+        socialContext,
       });
 
       // Phase 2: Resolve sampling preset (config preset → lookup, merged with card preset)
@@ -430,8 +478,8 @@ export class Pipeline {
 
     // Build action list
     const actions: import('../types/actions.js').Action[] = decision === 'reply' && reply
-      ? [{ type: 'reply' as const, content: reply }, ...memoryActions]
-      : [{ type: decision as 'hesitate' | 'suppress' }, ...memoryActions];
+      ? [{ type: 'reply' as const, content: reply, delivery_mode: resolveDeliveryMode(emotionAfter) }, ...memoryActions, ...socialActions]
+      : [{ type: decision as 'hesitate' | 'suppress' }, ...memoryActions, ...socialActions];
 
     // Create replay stream from buffered chunks for SSE passthrough
     const replayStream = s2StreamChunks.length > 0

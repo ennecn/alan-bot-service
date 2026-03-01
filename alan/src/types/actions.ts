@@ -16,11 +16,17 @@ export type TriggerType =
   | 'system_event';
 
 // ============================================================
+// Delivery Modes
+// ============================================================
+
+export type DeliveryMode = 'burst' | 'fragmented' | 'minimal' | 'single';
+
+// ============================================================
 // Action System (8.3)
 // ============================================================
 
 export type Action =
-  | { type: 'reply'; content: string; delay?: number }
+  | { type: 'reply'; content: string; delay?: number; delivery_mode?: DeliveryMode }
   | { type: 'hesitate' }
   | { type: 'suppress' }
   | { type: 'post_moment'; content: string; mood: string }

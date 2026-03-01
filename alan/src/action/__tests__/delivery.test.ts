@@ -79,4 +79,43 @@ describe('DeliveryAdapter', () => {
     expect(DeliveryAdapter.splitMultiMessage('a\n\n---\n\nb\n\n---\n\nc')).toEqual(['a', 'b', 'c']);
     expect(DeliveryAdapter.splitMultiMessage('')).toEqual(['']);
   });
+
+  // Delivery mode tests
+  it('burst mode: multi-message with shorter delays', async () => {
+    const adapter = new DeliveryAdapter();
+    const action: Action = { type: 'reply', content: 'Part one\n\n---\n\nPart two', delivery_mode: 'burst' };
+    const result = await adapter.execute(action);
+    const payload = result.payload as DeliveryPayload;
+    expect(payload.content).toBe('Part one');
+    expect(payload.delayed.length).toBe(1);
+    expect(payload.delayed[0].delay).toBeLessThanOrEqual(800);
+  });
+
+  it('fragmented mode: multi-message with standard delays', async () => {
+    const adapter = new DeliveryAdapter();
+    const action: Action = { type: 'reply', content: 'Part one\n\n---\n\nPart two', delivery_mode: 'fragmented' };
+    const result = await adapter.execute(action);
+    const payload = result.payload as DeliveryPayload;
+    expect(payload.content).toBe('Part one');
+    expect(payload.delayed.length).toBe(1);
+    expect(payload.delayed[0].delay).toBeGreaterThanOrEqual(1000);
+  });
+
+  it('minimal mode: only first segment returned', async () => {
+    const adapter = new DeliveryAdapter();
+    const action: Action = { type: 'reply', content: 'Part one\n\n---\n\nPart two\n\n---\n\nPart three', delivery_mode: 'minimal' };
+    const result = await adapter.execute(action);
+    const payload = result.payload as DeliveryPayload;
+    expect(payload.content).toBe('Part one');
+    expect(payload.delayed).toEqual([]);
+  });
+
+  it('single mode: entire content as one message, no splitting', async () => {
+    const adapter = new DeliveryAdapter();
+    const action: Action = { type: 'reply', content: 'Part one\n\n---\n\nPart two', delivery_mode: 'single' };
+    const result = await adapter.execute(action);
+    const payload = result.payload as DeliveryPayload;
+    expect(payload.content).toBe('Part one\n\n---\n\nPart two');
+    expect(payload.delayed).toEqual([]);
+  });
 });

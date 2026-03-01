@@ -17,6 +17,8 @@ import { WIStore } from '../storage/wi-store.js';
 import { EmotionStateStore } from '../storage/emotion-state.js';
 import { MetricsWriter } from '../storage/metrics.js';
 import { makeEmotionState } from '../emotion/calculator.js';
+import { mapSocialEvent } from '../social/event-mapper.js';
+import type { SocialEvent } from '../social/types.js';
 import type { CardData } from '../card-import/mapper.js';
 
 export class AlanEngine {
@@ -27,6 +29,8 @@ export class AlanEngine {
   readonly chatHistory: ChatHistoryStore;
   readonly wiStore: WIStore;
   private coldStartDone = false;
+  private archiveTimer?: ReturnType<typeof setInterval>;
+  private socialTimer?: ReturnType<typeof setInterval>;
 
   constructor(readonly config: AlanConfig) {
     // Ensure workspace internal dir exists
@@ -49,6 +53,20 @@ export class AlanEngine {
     this.dispatcher.registerAdapter(new EventBusAdapter(config.event_bus_url, config.agent_id));
 
     console.log(`[alan-engine] initialized for agent "${config.agent_id}" at ${config.workspace_path}`);
+
+    // Start 24h archive timer
+    this.archiveTimer = setInterval(() => {
+      try {
+        const count = this.chatHistory.archive();
+        if (count > 0) console.log(`[alan-engine] archived ${count} old messages`);
+      } catch (err) {
+        console.error('[alan-engine] archive failed:', err);
+      }
+    }, 24 * 60 * 60 * 1000);
+
+    // Social layer: register + start polling
+    this.registerAgent();
+    this.startSocialLoop();
   }
 
   async run(event: CoordinatorEvent): Promise<ActionList> {
@@ -75,6 +93,61 @@ export class AlanEngine {
     }
 
     return result;
+  }
+
+  destroy(): void {
+    if (this.archiveTimer) clearInterval(this.archiveTimer);
+    this.stopSocialLoop();
+  }
+
+  private async registerAgent(): Promise<void> {
+    if (!this.config.event_bus_url) return;
+    try {
+      await fetch(`${this.config.event_bus_url}/agents/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: this.config.agent_id,
+          name: this.config.agent_id,
+          status: 'online',
+        }),
+      });
+      console.log(`[alan-engine] registered agent "${this.config.agent_id}" with event bus`);
+    } catch (err) {
+      console.warn('[alan-engine] agent registration failed (non-fatal):', err);
+    }
+  }
+
+  private startSocialLoop(intervalMs = 30_000): void {
+    if (!this.config.event_bus_url) return;
+    this.socialTimer = setInterval(async () => {
+      try {
+        // Heartbeat
+        await fetch(`${this.config.event_bus_url}/agents/${this.config.agent_id}/heartbeat`, {
+          method: 'POST',
+        });
+        // Poll events
+        const res = await fetch(
+          `${this.config.event_bus_url}/agents/${this.config.agent_id}/events?limit=10`,
+        );
+        if (!res.ok) return;
+        const events = (await res.json()) as SocialEvent[];
+        for (const evt of events) {
+          const mapped = mapSocialEvent(evt);
+          if (mapped) {
+            this.run(mapped).catch(err =>
+              console.error('[alan-engine] social event processing failed:', err),
+            );
+          }
+        }
+      } catch {
+        // Silent — event bus may be down
+      }
+    }, intervalMs);
+  }
+
+  stopSocialLoop(): void {
+    if (this.socialTimer) clearInterval(this.socialTimer);
   }
 
   private detectColdStart(): void {

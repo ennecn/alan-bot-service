@@ -43,5 +43,33 @@ export function adminRoutes(engine: AlanEngine) {
     }
   });
 
+  app.post('/admin/archive', async (c) => {
+    try {
+      const count = engine.chatHistory.archive();
+      return c.json({ status: 'ok', archived_count: count });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ status: 'error', message }, 500);
+    }
+  });
+
+  app.post('/admin/life-simulate', async (c) => {
+    try {
+      const result = await engine.run({
+        trigger: 'cron',
+        content: '[LifeSimulation] Periodic activity check',
+        timestamp: new Date().toISOString(),
+      });
+      return c.json({
+        status: 'ok',
+        decision: result.decision,
+        actions: result.actions.map(a => a.type),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ status: 'error', message }, 500);
+    }
+  });
+
   return app;
 }

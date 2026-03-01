@@ -8,14 +8,17 @@ import { parseCardFile } from './png-parser.js';
 import { mapCard, persistCardData } from './mapper.js';
 import { validateSchemaVersion } from './schema-version.js';
 import { backfillEmbeddings } from '../embedding/backfill.js';
+import { callImportLLM } from './import-llm.js';
 import { initDatabase } from '../storage/database.js';
 import { WIStore } from '../storage/wi-store.js';
 import type { EmbeddingConfig } from '../embedding/client.js';
+import type { AlanConfig } from '../types/actions.js';
 import type { ImportResult } from './types.js';
 
 export interface ImportOptions {
   reimport?: boolean;
   embeddingConfig?: EmbeddingConfig;
+  alanConfig?: AlanConfig;
 }
 
 /**
@@ -61,6 +64,16 @@ export async function importCard(
 
   // Persist card prompt data for prompt assembler
   persistCardData(card, workspacePath, lang);
+
+  // Run Import LLM for first-time imports when config is available
+  if (!reimport && options?.alanConfig) {
+    try {
+      await callImportLLM(options.alanConfig, workspacePath);
+      console.log('[card-import] Import LLM completed successfully');
+    } catch (err) {
+      console.error('[card-import] Import LLM failed (non-fatal):', err);
+    }
+  }
 
   // Backfill embeddings for WI entries if config provided
   if (options?.embeddingConfig && result.wi_count > 0) {
