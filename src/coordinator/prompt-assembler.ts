@@ -104,6 +104,8 @@ export interface AssemblyParams {
   bannedWordText?: string;
   /** Post-processor reinforcement for L3 injection (Phase 2) */
   reinforcement?: string;
+  /** Social context for L3 injection */
+  socialContext?: string;
 }
 
 interface AnthropicMessage {
@@ -194,7 +196,7 @@ export function assemble(params: AssemblyParams): { system: string; messages: An
 
   // L3: quality block + reinforcement + IMPULSE.md + framed emotion narrative + activated WI
   const activatedWIText = formatWIEntries(params.activatedWI);
-  const l3Parts = [qualityBlock, params.reinforcement, params.impulseMd, framedNarrative, activatedWIText].filter(Boolean);
+  const l3Parts = [qualityBlock, params.reinforcement, params.impulseMd, framedNarrative, params.socialContext, activatedWIText].filter(Boolean);
   const l3Budget = Math.min(L3_BUDGET_MAX, Math.max(L3_BUDGET_MIN, estimateTokens(l3Parts.join('\n\n'))));
   const l3 = truncateToTokens(l3Parts.join('\n\n'), l3Budget);
 

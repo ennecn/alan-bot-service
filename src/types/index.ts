@@ -74,4 +74,13 @@ export interface System1Output {
     should_save: boolean;
     summary: string;
   };
+  social_actions?: {
+    should_post?: boolean;
+    post_content?: string;
+    post_mood?: string;
+    should_react?: boolean;
+    react_target?: string;
+    react_type?: 'like' | 'comment';
+    react_content?: string;
+  };
 }

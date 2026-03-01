@@ -69,6 +69,41 @@ export const PROCESS_EVENT_TOOL = {
         },
         required: ['should_save', 'summary'],
       },
+      social_actions: {
+        type: 'object' as const,
+        description: 'Optional social actions the character wants to take. Only include if genuinely motivated.',
+        properties: {
+          should_post: {
+            type: 'boolean' as const,
+            description: 'Whether the character wants to post a moment/status update.',
+          },
+          post_content: {
+            type: 'string' as const,
+            description: 'Content of the social post. Empty if should_post is false.',
+          },
+          post_mood: {
+            type: 'string' as const,
+            description: 'Mood tag for the post (e.g. "happy", "reflective", "excited").',
+          },
+          should_react: {
+            type: 'boolean' as const,
+            description: 'Whether the character wants to react to something in social context.',
+          },
+          react_target: {
+            type: 'string' as const,
+            description: 'ID or description of the post/content to react to.',
+          },
+          react_type: {
+            type: 'string' as const,
+            enum: ['like', 'comment'],
+            description: 'Type of reaction.',
+          },
+          react_content: {
+            type: 'string' as const,
+            description: 'Content of the comment. Empty if react_type is "like".',
+          },
+        },
+      },
     },
     required: [
       'event_classification',

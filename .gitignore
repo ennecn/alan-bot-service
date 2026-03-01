@@ -7,3 +7,4 @@ dist/
 test-workspace/data/internal/
 .env
 .env.*
+.env

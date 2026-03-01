@@ -27,6 +27,28 @@ export class DeliveryAdapter implements ActionAdapter {
   async execute(action: Action): Promise<ActionResult> {
     switch (action.type) {
       case 'reply': {
+        const mode = ('delivery_mode' in action ? action.delivery_mode : undefined) ?? 'fragmented';
+
+        if (mode === 'minimal') {
+          const segments = DeliveryAdapter.splitMultiMessage(action.content);
+          const payload: DeliveryPayload = {
+            content: segments[0],
+            delayed: [...this.delayed],
+          };
+          this.delayed = [];
+          return { success: true, payload };
+        }
+
+        if (mode === 'single') {
+          const payload: DeliveryPayload = {
+            content: action.content,
+            delayed: [...this.delayed],
+          };
+          this.delayed = [];
+          return { success: true, payload };
+        }
+
+        // burst and fragmented both split
         const segments = DeliveryAdapter.splitMultiMessage(action.content);
         if (segments.length === 1) {
           const payload: DeliveryPayload = {
@@ -36,10 +58,14 @@ export class DeliveryAdapter implements ActionAdapter {
           this.delayed = [];
           return { success: true, payload };
         }
-        // Multi-message: first segment immediate, rest delayed
+
+        const delayRange = mode === 'burst'
+          ? { min: 300, max: 800 }
+          : { min: 1000, max: 3000 };
+
         const delayed = segments.slice(1).map((seg, i) => ({
           content: seg,
-          delay: (i + 1) * (1000 + Math.floor(Math.random() * 2000)),
+          delay: (i + 1) * (delayRange.min + Math.floor(Math.random() * (delayRange.max - delayRange.min))),
         }));
         const payload: DeliveryPayload = {
           content: segments[0],

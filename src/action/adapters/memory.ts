@@ -36,6 +36,17 @@ export class MemoryAdapter implements ActionAdapter {
         } else {
           fs.writeFileSync(memPath, `# Memory\n${entry}`, 'utf-8');
         }
+
+        // Size management: trim to 150 entries if over 200 lines
+        const content = fs.readFileSync(memPath, 'utf-8');
+        const lines = content.split('\n');
+        if (lines.length > 200) {
+          const sections = content.split('\n## ');
+          const header = sections[0]; // "# Memory\n..."
+          const entries = sections.slice(1);
+          const kept = entries.slice(-150).map(s => '## ' + s);
+          fs.writeFileSync(memPath, header.trimEnd() + '\n' + kept.join('\n'), 'utf-8');
+        }
       };
 
       if (this.memoryQueue) {
