@@ -37,6 +37,13 @@ export function sanitizeOutput(raw: Record<string, unknown>): System1Output {
       emotional[d] = clamp(-0.3, 0.3, emotionalRaw[d]);
     }
   }
+  const customRaw = (raw.custom_deltas ?? {}) as Record<string, number>;
+  const customDeltas: Record<string, number> = {};
+  for (const [key, value] of Object.entries(customRaw)) {
+    if (typeof value !== 'number') continue;
+    if (key.length === 0 || key.length > 64) continue;
+    customDeltas[key] = clamp(-0.3, 0.3, value);
+  }
 
   const mc = (raw.memory_consolidation ?? {}) as Record<string, unknown>;
 
@@ -46,6 +53,7 @@ export function sanitizeOutput(raw: Record<string, unknown>): System1Output {
       importance: VALID_IMPORTANCES.has(rawImportance) ? rawImportance as EventImportance : nearestImportance(rawImportance),
     },
     emotional_interpretation: emotional,
+    custom_deltas: customDeltas,
     cognitive_projection: typeof raw.cognitive_projection === 'string' ? raw.cognitive_projection : '',
     wi_expansion: Array.isArray(raw.wi_expansion) ? raw.wi_expansion.filter((x): x is string => typeof x === 'string') : [],
     impulse_narrative: typeof raw.impulse_narrative === 'string' ? raw.impulse_narrative : '',

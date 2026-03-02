@@ -23,6 +23,8 @@ export interface ImpulseParams {
   urgencyWeight?: number;
   /** Number of consecutive suppressions */
   suppressionCount: number;
+  /** Slow-memory pressure from memory pools (default 0.0) */
+  memoryPressure?: number;
   /** Hours since last interaction */
   hoursSinceLastInteraction: number;
   /** Time threshold for time pressure, default 2.0 */
@@ -46,6 +48,7 @@ export interface ImpulseParams {
  *   base_impulse
  *   + max(abs(deltas)) * urgency_weight
  *   + suppression_count * 0.15
+ *   + memory_pressure
  *   + sigmoid((hours - threshold) * steepness) * 0.3
  *   + event_importance * 0.2
  *   + 0.1 * consecutive_unreplied
@@ -58,6 +61,7 @@ export function calculateImpulse(params: ImpulseParams): ImpulseResult {
   const steepness = params.steepness ?? 1.0;
   const userMsgInc = params.userMessageIncrement ?? 0.1;
   const fireThreshold = params.fireThreshold ?? 0.6;
+  const memoryPressure = params.memoryPressure ?? 0;
 
   // Component 1: base
   const base = baseImpulse;
@@ -69,22 +73,26 @@ export function calculateImpulse(params: ImpulseParams): ImpulseResult {
   // Component 3: suppression pressure
   const suppressionPressure = params.suppressionCount * 0.15;
 
-  // Component 4: time pressure
+  // Component 4: memory pools pressure
+  const memoryPoolPressure = memoryPressure;
+
+  // Component 5: time pressure
   const timePressure = sigmoid((params.hoursSinceLastInteraction - timeThreshold) * steepness) * 0.3;
 
-  // Component 5: event importance
+  // Component 6: event importance
   const eventImp = params.eventImportance * 0.2;
 
-  // Component 6: user message increment
+  // Component 7: user message increment
   const userMsgIncrement = userMsgInc * params.consecutiveUnreplied;
 
-  const raw = base + emotionUrgency + suppressionPressure + timePressure + eventImp + userMsgIncrement;
+  const raw = base + emotionUrgency + suppressionPressure + memoryPoolPressure + timePressure + eventImp + userMsgIncrement;
   const value = clamp01(raw);
 
   const components: ImpulseComponents = {
     base_impulse: base,
     emotion_urgency: emotionUrgency,
     suppression_pressure: suppressionPressure,
+    memory_pressure: memoryPoolPressure,
     time_pressure: timePressure,
     event_importance: eventImp,
     user_message_increment: userMsgIncrement,

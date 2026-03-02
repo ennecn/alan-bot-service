@@ -92,6 +92,7 @@ export function presetRoutes(engine: AlanEngine) {
         imported_at: new Date().toISOString(),
       });
       saveManifest(ws, manifest);
+      engine.pipeline.invalidatePresetCache();
 
       return c.json({
         status: 'ok',
@@ -157,6 +158,7 @@ export function presetRoutes(engine: AlanEngine) {
 
       for (const p of manifest.presets) p.active = p.id === id;
       saveManifest(ws, manifest);
+      engine.pipeline.invalidatePresetCache();
 
       return c.json({
         status: 'ok',

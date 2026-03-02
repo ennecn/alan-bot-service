@@ -5,11 +5,15 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { EmotionSnapshot, EmotionState, SuppressionFatigue } from '../types/index.js';
+import type { EmotionSnapshot, EmotionState, SuppressionFatigue, MemoryPools } from '../types/index.js';
 
 const FILENAME = 'emotion_state.md';
 
 const EMOTION_DIMS = ['joy', 'sadness', 'anger', 'anxiety', 'longing', 'trust'] as const;
+const DEFAULT_MEMORY_POOLS: MemoryPools = {
+  attachment_pool: 0,
+  stress_pool: 0,
+};
 
 export class EmotionStateStore {
   /** Read and parse emotion_state.md. Returns null if file missing or parse fails. */
@@ -37,6 +41,16 @@ export class EmotionStateStore {
     for (const dim of EMOTION_DIMS) {
       if (Math.abs(verified.current[dim] - snapshot.current[dim]) > 0.001) return false;
     }
+    const expectedPools = snapshot.memory_pools ?? DEFAULT_MEMORY_POOLS;
+    const actualPools = verified.memory_pools ?? DEFAULT_MEMORY_POOLS;
+    if (Math.abs(actualPools.attachment_pool - expectedPools.attachment_pool) > 0.001) return false;
+    if (Math.abs(actualPools.stress_pool - expectedPools.stress_pool) > 0.001) return false;
+    const expectedCustom = snapshot.custom_state ?? {};
+    const actualCustom = verified.custom_state ?? {};
+    if (Object.keys(expectedCustom).length !== Object.keys(actualCustom).length) return false;
+    for (const [key, value] of Object.entries(expectedCustom)) {
+      if (Math.abs((actualCustom[key] ?? 0) - value) > 0.001) return false;
+    }
     if ((verified.directive_history?.length ?? 0) !== (snapshot.directive_history?.length ?? 0)) return false;
     const origStreakKeys = Object.keys(snapshot.banned_word_streak ?? {}).length;
     const verifiedStreakKeys = Object.keys(verified.banned_word_streak ?? {}).length;
@@ -46,6 +60,8 @@ export class EmotionStateStore {
 }
 
 function serializeEmotionMd(s: EmotionSnapshot): string {
+  const pools = s.memory_pools ?? DEFAULT_MEMORY_POOLS;
+  const customEntries = Object.entries(s.custom_state ?? {});
   const lines: string[] = [
     '# Emotion State',
     '',
@@ -60,6 +76,13 @@ function serializeEmotionMd(s: EmotionSnapshot): string {
     `- consecutive_hesitate: ${s.suppression.consecutive_hesitate}`,
     `- accumulated: ${s.suppression.accumulated.toFixed(3)}`,
     `- last_suppress: ${s.suppression.last_suppress ?? 'null'}`,
+    '',
+    '## Memory Pools',
+    `- attachment_pool: ${pools.attachment_pool.toFixed(3)}`,
+    `- stress_pool: ${pools.stress_pool.toFixed(3)}`,
+    '',
+    '## Custom State',
+    `- data: ${JSON.stringify(Object.fromEntries(customEntries.map(([k, v]) => [k, Number(v.toFixed(3))])))}`,
     '',
     '## Meta',
     `- last_interaction: ${s.last_interaction}`,
@@ -80,11 +103,22 @@ function parseEmotionMd(content: string): EmotionSnapshot | null {
     const current = parseSection(content, 'Current');
     const baseline = parseSection(content, 'Baseline');
     const suppression = parseSuppressionSection(content);
+    const memoryPools = parseMemoryPoolsSection(content);
+    const customState = parseCustomStateSection(content);
     const meta = parseMetaSection(content);
     if (!current || !baseline || !suppression || !meta) return null;
     const directiveHistory = parseDirectiveHistorySection(content);
     const bannedWordStreak = parseBannedWordStreakSection(content);
-    return { current, baseline, suppression, ...meta, directive_history: directiveHistory, banned_word_streak: bannedWordStreak };
+    return {
+      current,
+      baseline,
+      suppression,
+      memory_pools: memoryPools ?? DEFAULT_MEMORY_POOLS,
+      custom_state: customState,
+      ...meta,
+      directive_history: directiveHistory,
+      banned_word_streak: bannedWordStreak,
+    };
   } catch {
     return null;
   }
@@ -122,6 +156,22 @@ function parseSuppressionSection(content: string): SuppressionFatigue | null {
   return { count, consecutive_hesitate: consec, accumulated: accum, last_suppress: lastSuppress };
 }
 
+function parseMemoryPoolsSection(content: string): MemoryPools | null {
+  const regex = /## Memory Pools\n([\s\S]*?)(?=\n##|$)/;
+  const match = content.match(regex);
+  if (!match) return null;
+
+  const block = match[1];
+  const attachment = extractNum(block, 'attachment_pool');
+  const stress = extractNum(block, 'stress_pool');
+  if (attachment === null || stress === null) return null;
+
+  return {
+    attachment_pool: attachment,
+    stress_pool: stress,
+  };
+}
+
 function parseMetaSection(content: string): { last_interaction: string; session_start: string } | null {
   const regex = /## Meta\n([\s\S]*?)(?=\n##|$)/;
   const match = content.match(regex);
@@ -132,6 +182,27 @@ function parseMetaSection(content: string): { last_interaction: string; session_
   if (!liMatch || !ssMatch) return null;
 
   return { last_interaction: liMatch[1].trim(), session_start: ssMatch[1].trim() };
+}
+
+function parseCustomStateSection(content: string): Record<string, number> {
+  const regex = /## Custom State\n([\s\S]*?)(?=\n##|$)/;
+  const match = content.match(regex);
+  if (!match) return {};
+  const dataMatch = match[1].match(/- data:\s*(.*)/);
+  if (!dataMatch) return {};
+
+  try {
+    const parsed = JSON.parse(dataMatch[1].trim()) as Record<string, unknown>;
+    const clean: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value !== 'number') continue;
+      if (key.length === 0 || key.length > 64) continue;
+      clean[key] = value;
+    }
+    return clean;
+  } catch {
+    return {};
+  }
 }
 
 function parseDirectiveHistorySection(content: string): string[] {

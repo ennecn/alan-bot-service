@@ -38,6 +38,13 @@ const sampleCard: STCardV2 = {
     behavioral_engine: {
       schema_version: '1.0',
       emotion_baseline: { joy: 0.7, trust: 0.6 },
+      custom_emotions: {
+        hello_kitty: {
+          range: [0, 1],
+          baseline: 0.3,
+          projection: { joy: 0.8, trust: 0.2 },
+        },
+      },
     },
   },
 };
@@ -73,6 +80,7 @@ describe('Card Import: card-data.json persistence', () => {
     expect(cardData.post_history_instructions).toBe('Always stay in character.');
     expect(cardData.mes_example).toContain('{{char}}');
     expect(cardData.detected_language).toBe('zh');
+    expect(cardData.behavioral_engine?.custom_emotions?.hello_kitty?.baseline).toBe(0.3);
   });
 
   it('constructs system_prompt from description+personality+scenario when system_prompt is empty', async () => {

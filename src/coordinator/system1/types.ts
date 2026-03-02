@@ -5,6 +5,13 @@
 import type { EmotionState } from '../../types/index.js';
 import type { TriggerType } from '../../types/actions.js';
 
+export interface CustomEmotionPromptState {
+  name: string;
+  current: number;
+  baseline: number;
+  range: [number, number];
+}
+
 export interface System1PromptParams {
   /** Character cognitive filter / persona description */
   characterFilter: string;
@@ -20,6 +27,8 @@ export interface System1PromptParams {
   language: 'zh' | 'en' | 'ja';
   /** Previous IMPULSE.md content (null on first turn) */
   previousImpulse: string | null;
+  /** Optional configured custom emotions and current values */
+  customEmotions?: CustomEmotionPromptState[];
 }
 
 export interface System1CallParams extends System1PromptParams {

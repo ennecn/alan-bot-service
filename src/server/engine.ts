@@ -196,10 +196,17 @@ export class AlanEngine {
     if (!fs.existsSync(emotionPath)) {
       const now = new Date().toISOString();
       const defaultState = makeEmotionState(0.5);
+      const customState = Object.fromEntries(
+        Object.entries(cardData?.behavioral_engine?.custom_emotions ?? {})
+          .filter(([, cfg]) => cfg && Array.isArray(cfg.range) && cfg.range.length === 2)
+          .map(([name, cfg]) => [name, Number(cfg.baseline)]),
+      ) as Record<string, number>;
       this.emotionStore.write(ws, {
         current: defaultState,
         baseline: defaultState,
         suppression: { count: 0, consecutive_hesitate: 0, accumulated: 0, last_suppress: null },
+        memory_pools: { attachment_pool: 0, stress_pool: 0 },
+        custom_state: customState,
         last_interaction: now,
         session_start: now,
       });

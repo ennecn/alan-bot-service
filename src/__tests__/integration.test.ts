@@ -540,4 +540,162 @@ describe('Integration: full pipeline end-to-end', () => {
       s2Mock.restore();
     }
   });
+
+  it('applies custom_deltas into custom_state and projects to base emotions', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFn = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+
+      if (url.includes('localhost:9999') && url.includes('/v1/messages')) {
+        return new Response(JSON.stringify({
+          content: [{
+            type: 'tool_use',
+            name: 'process_event',
+            input: {
+              event_classification: { type: 'heartbeat', importance: 0.3 },
+              emotional_interpretation: {},
+              custom_deltas: { hello_kitty: 0.3 },
+              cognitive_projection: 'Thinking about cute things.',
+              wi_expansion: [],
+              impulse_narrative: 'Feeling warm.',
+              memory_consolidation: { should_save: false, summary: '' },
+            },
+          }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      return originalFetch(input, _init);
+    });
+    globalThis.fetch = mockFn as typeof fetch;
+
+    try {
+      const config = makeConfig(tmpDir);
+      config.fire_threshold = 0.95;
+      const pipeline = new Pipeline(config);
+
+      fs.writeFileSync(
+        path.join(tmpDir, 'internal', 'card-data.json'),
+        JSON.stringify({
+          system_prompt: 'Test',
+          post_history_instructions: '',
+          mes_example: '',
+          character_name: 'Alin',
+          detected_language: 'en',
+          behavioral_engine: {
+            schema_version: '1.0',
+            custom_emotions: {
+              hello_kitty: { range: [0, 1], baseline: 0.2 },
+            },
+          },
+        }),
+      );
+
+      const store = new EmotionStateStore();
+      const seeded = store.read(tmpDir)!;
+      store.write(tmpDir, {
+        ...seeded,
+        custom_state: { hello_kitty: 0.2 },
+      });
+
+      const event: CoordinatorEvent = {
+        trigger: 'heartbeat',
+        content: '',
+        timestamp: new Date().toISOString(),
+      };
+
+      const result = await pipeline.run(event);
+      expect(result.metrics.degraded).toBe(false);
+      expect((result.emotion.custom_state ?? {}).hello_kitty).toBeGreaterThan(0.2);
+      const elapsedHours = (
+        new Date(event.timestamp).getTime() - new Date(seeded.last_interaction).getTime()
+      ) / 3_600_000;
+      const expectedNoProjectionJoy = seeded.baseline.joy
+        + (seeded.current.joy - seeded.baseline.joy) * Math.exp(-elapsedHours / 2);
+      expect(result.emotion.current.joy).toBeGreaterThan(expectedNoProjectionJoy);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('uses custom projection weights when provided in card config', async () => {
+    const originalFetch = globalThis.fetch;
+    const mockFn = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+
+      if (url.includes('localhost:9999') && url.includes('/v1/messages')) {
+        return new Response(JSON.stringify({
+          content: [{
+            type: 'tool_use',
+            name: 'process_event',
+            input: {
+              event_classification: { type: 'heartbeat', importance: 0.3 },
+              emotional_interpretation: {},
+              custom_deltas: { focus_mode: 0.3 },
+              cognitive_projection: 'Switching to focused mode.',
+              wi_expansion: [],
+              impulse_narrative: 'Narrowing attention.',
+              memory_consolidation: { should_save: false, summary: '' },
+            },
+          }],
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
+      return originalFetch(input, _init);
+    });
+    globalThis.fetch = mockFn as typeof fetch;
+
+    try {
+      const config = makeConfig(tmpDir);
+      config.fire_threshold = 0.95;
+      const pipeline = new Pipeline(config);
+
+      fs.writeFileSync(
+        path.join(tmpDir, 'internal', 'card-data.json'),
+        JSON.stringify({
+          system_prompt: 'Test',
+          post_history_instructions: '',
+          mes_example: '',
+          character_name: 'Alin',
+          detected_language: 'en',
+          behavioral_engine: {
+            schema_version: '1.0',
+            custom_emotions: {
+              focus_mode: {
+                range: [0, 1],
+                baseline: 0.2,
+                projection: { anger: 0.8, joy: -0.2 },
+              },
+            },
+          },
+        }),
+      );
+
+      const store = new EmotionStateStore();
+      const seeded = store.read(tmpDir)!;
+      store.write(tmpDir, {
+        ...seeded,
+        custom_state: { focus_mode: 0.2 },
+      });
+
+      const event: CoordinatorEvent = {
+        trigger: 'heartbeat',
+        content: '',
+        timestamp: new Date().toISOString(),
+      };
+
+      const result = await pipeline.run(event);
+      const elapsedHours = (
+        new Date(event.timestamp).getTime() - new Date(seeded.last_interaction).getTime()
+      ) / 3_600_000;
+      const noProjAnger = seeded.baseline.anger
+        + (seeded.current.anger - seeded.baseline.anger) * Math.exp(-elapsedHours / 2);
+      const noProjJoy = seeded.baseline.joy
+        + (seeded.current.joy - seeded.baseline.joy) * Math.exp(-elapsedHours / 2);
+
+      expect(result.emotion.current.anger).toBeGreaterThan(noProjAnger);
+      expect(result.emotion.current.joy).toBeLessThan(noProjJoy);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

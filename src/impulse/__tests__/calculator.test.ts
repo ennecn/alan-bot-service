@@ -15,6 +15,7 @@ describe('calculateImpulse', () => {
     expect(result.value).toBeCloseTo(0.3 + 0.119 * 0.3, 2);
     expect(result.fired).toBe(false);
     expect(result.fire_threshold).toBe(0.6);
+    expect(result.components.memory_pressure).toBe(0);
   });
 
   it('fires when impulse exceeds threshold', () => {
@@ -48,6 +49,7 @@ describe('calculateImpulse', () => {
     expect(result.components.base_impulse).toBe(0.2);
     expect(result.components.emotion_urgency).toBeCloseTo(0.15, 4); // max(0.15, 0.1) * 1.0
     expect(result.components.suppression_pressure).toBeCloseTo(0.15, 4); // 1 * 0.15
+    expect(result.components.memory_pressure).toBeCloseTo(0, 4);
     expect(result.components.time_pressure).toBeCloseTo(0.15, 2); // sigmoid(0)*0.3 = 0.5*0.3
     expect(result.components.event_importance).toBeCloseTo(0.06, 4); // 0.3 * 0.2
     expect(result.components.user_message_increment).toBeCloseTo(0.2, 4); // 0.1 * 2
@@ -77,5 +79,28 @@ describe('calculateImpulse', () => {
     expect(result.fire_threshold).toBe(0.2);
     // value ≈ 0.336, threshold 0.2 → fired
     expect(result.fired).toBe(true);
+  });
+
+  it('applies memory pressure as an additive component', () => {
+    const withoutMemory = calculateImpulse({
+      emotionDeltas: {},
+      suppressionCount: 0,
+      hoursSinceLastInteraction: 0,
+      eventImportance: 0,
+      consecutiveUnreplied: 0,
+      memoryPressure: 0,
+    });
+
+    const withMemory = calculateImpulse({
+      emotionDeltas: {},
+      suppressionCount: 0,
+      hoursSinceLastInteraction: 0,
+      eventImportance: 0,
+      consecutiveUnreplied: 0,
+      memoryPressure: 0.2,
+    });
+
+    expect(withMemory.components.memory_pressure).toBeCloseTo(0.2, 6);
+    expect(withMemory.value).toBeCloseTo(Math.min(1, withoutMemory.value + 0.2), 6);
   });
 });

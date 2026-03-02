@@ -36,6 +36,16 @@ export interface STCardCharacterBook {
   recursive_scanning?: boolean;
 }
 
+export interface CustomEmotionConfig {
+  range: [number, number];
+  baseline: number;
+  /**
+   * Optional projection weights onto base 6 emotions.
+   * If omitted, engine falls back to name-based heuristic projection.
+   */
+  projection?: Partial<Record<EmotionDimension, number>>;
+}
+
 export interface BehavioralEngineConfig {
   schema_version: string;
   emotion_baseline?: Partial<Record<EmotionDimension, number>>;
@@ -45,7 +55,7 @@ export interface BehavioralEngineConfig {
     suppress_ceiling?: number;
   };
   emotion_templates?: Record<string, Partial<Record<EmotionDimension, number>>>;
-  custom_emotions?: Record<string, { range: [number, number]; baseline: number }>;
+  custom_emotions?: Record<string, CustomEmotionConfig>;
 }
 
 export interface STCardV2 {

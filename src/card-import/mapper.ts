@@ -22,6 +22,7 @@ export interface CardData {
   mes_example: string;
   character_name: string;
   detected_language: string;
+  behavioral_engine?: BehavioralEngineConfig;
   output_style?: 'default' | 'casual';
 }
 
@@ -109,6 +110,7 @@ export function persistCardData(
     mes_example: card.mes_example || '',
     character_name: card.name,
     detected_language: detectedLanguage,
+    behavioral_engine: card.extensions?.behavioral_engine,
   };
 
   fs.writeFileSync(

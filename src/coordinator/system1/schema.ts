@@ -41,6 +41,15 @@ export const PROCESS_EVENT_TOOL = {
           trust: { type: 'number' as const, minimum: -0.3, maximum: 0.3 },
         },
       },
+      custom_deltas: {
+        type: 'object' as const,
+        description: 'Optional deltas for configured custom emotions. Key is custom emotion name, value is between -0.3 and 0.3.',
+        additionalProperties: {
+          type: 'number' as const,
+          minimum: -0.3,
+          maximum: 0.3,
+        },
+      },
       cognitive_projection: {
         type: 'string' as const,
         description: 'What the character would think upon receiving this event. Inner monologue.',

@@ -8,7 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { EmotionDimension, EmotionSnapshot, System1Output } from '../types/index.js';
+import type { EmotionDimension, EmotionSnapshot, MemoryPools, System1Output } from '../types/index.js';
 import type { AlanConfig, CoordinatorMetrics, WIEntry } from '../types/actions.js';
 import type { CoordinatorEvent, ActionList, PipelineContext } from './types.js';
 import { Mutex } from './mutex.js';
@@ -44,6 +44,12 @@ import { getGuardText } from '../quality/guards.js';
 import { getBannedWordText } from '../quality/banned-words.js';
 import { scanForBannedWords, sanitizeS1Output } from '../quality/post-processor.js';
 import { resolveDeliveryMode } from '../action/adapters/delivery-modes.js';
+
+interface CustomEmotionDef {
+  baseline: number;
+  range: [number, number];
+  projection?: Partial<Record<EmotionDimension, number>>;
+}
 
 export class Pipeline {
   private mutex = new Mutex();
@@ -86,6 +92,14 @@ export class Pipeline {
     return this.presetCache.data;
   }
 
+  /**
+   * Invalidate preset cache so the next request reloads workspace/internal/preset.json.
+   * Used by preset admin routes after upload/activate.
+   */
+  invalidatePresetCache(): void {
+    this.presetCache = { data: null, loaded: false };
+  }
+
   async run(event: CoordinatorEvent): Promise<ActionList> {
     const startMs = Date.now();
 
@@ -105,6 +119,9 @@ export class Pipeline {
     const emotionBefore = this.emotionStore.read(this.config.workspace_path) ?? makeDefaultSnapshot();
     const lastInteraction = new Date(emotionBefore.last_interaction);
     const elapsedHours = (now.getTime() - lastInteraction.getTime()) / 3_600_000;
+    const cardData = this.loadCardData();
+    const customDefs = getCustomEmotionDefs(cardData);
+    const customStateBefore = getCustomEmotionState(emotionBefore, customDefs);
 
     // (c) Read current emotion state — already done above
 
@@ -150,6 +167,12 @@ export class Pipeline {
         language: this.config.character_language,
         previousImpulse: impulseMd || null,
         oldImpulse: impulseMd || null,
+        customEmotions: Object.entries(customDefs).map(([name, cfg]) => ({
+          name,
+          current: customStateBefore[name],
+          baseline: cfg.baseline,
+          range: cfg.range,
+        })),
       },
       s1Config,
     );
@@ -166,14 +189,42 @@ export class Pipeline {
       system1Output.impulse_narrative = s1Sanitized.sanitized;
     }
 
+    const customDeltas = sanitizeCustomDeltas(system1Output.custom_deltas, customDefs);
+    const customStateAfter = updateCustomEmotionState(
+      customStateBefore,
+      customDefs,
+      customDeltas,
+      elapsedHours,
+    );
+    const projectedCustomDeltas = projectCustomToCoreDeltas(
+      customStateBefore,
+      customStateAfter,
+      customDefs,
+    );
+    const effectiveEmotionDeltas = mergeEmotionDeltas(
+      system1Output.emotional_interpretation,
+      projectedCustomDeltas,
+    );
+
     // (g) Deterministic emotion calculation
     const emotionAfter = updateEmotion(
       emotionBefore.current,
       emotionBefore.baseline,
       makeDefaultHalfLife(),
       elapsedHours,
-      system1Output.emotional_interpretation,
+      effectiveEmotionDeltas,
     );
+
+    // Slow-memory pools (attachment/stress) — long-horizon affect accumulators.
+    const poolsBefore = getMemoryPools(emotionBefore);
+    const poolsAfter = updateMemoryPools(
+      poolsBefore,
+      effectiveEmotionDeltas,
+      elapsedHours,
+      event.trigger,
+      emotionBefore.suppression.accumulated,
+    );
+    const memoryPressure = computeMemoryPressure(poolsAfter);
 
     // (h) Emotion narrativization
     const emotionNarrative = narrativize(emotionAfter, this.config.character_language);
@@ -226,8 +277,9 @@ export class Pipeline {
 
     // (j) Impulse calculation
     const impulse = calculateImpulse({
-      emotionDeltas: system1Output.emotional_interpretation,
+      emotionDeltas: effectiveEmotionDeltas,
       suppressionCount: emotionBefore.suppression.count,
+      memoryPressure,
       hoursSinceLastInteraction: elapsedHours,
       eventImportance: system1Output.event_classification.importance,
       consecutiveUnreplied: event.trigger === 'user_message' ? 1 : 0,
@@ -245,6 +297,8 @@ export class Pipeline {
       current: emotionAfter,
       baseline: emotionBefore.baseline,
       suppression: updateSuppression(emotionBefore.suppression, decision, event.timestamp),
+      memory_pools: poolsAfter,
+      custom_state: customStateAfter,
       last_interaction: event.timestamp,
       session_start: emotionBefore.session_start,
       directive_history: newDirectiveHistory,
@@ -295,7 +349,6 @@ export class Pipeline {
       // 4-layer prompt assembly
       const soulMdPath = path.join(this.config.workspace_path, 'SOUL.md');
       const soulMd = readFileOr(soulMdPath, '');
-      const cardData = this.loadCardData();
       const preset = this.loadPreset();
 
       const charName = cardData?.character_name ?? '';
@@ -453,7 +506,7 @@ export class Pipeline {
       duration_ms: Date.now() - startMs,
       system1_ms: s1Ms,
       system2_ms: s2Ms,
-      emotion_delta: system1Output.emotional_interpretation,
+      emotion_delta: effectiveEmotionDeltas,
       wi_activated: candidates.length,
       wi_total: allWI.length,
       actions: decision === 'reply' ? ['reply'] : [decision],
@@ -519,9 +572,232 @@ function makeDefaultSnapshot(): EmotionSnapshot {
     current: makeEmotionState(0.5),
     baseline: makeEmotionState(0.5),
     suppression: { count: 0, consecutive_hesitate: 0, accumulated: 0, last_suppress: null },
+    memory_pools: { attachment_pool: 0, stress_pool: 0 },
+    custom_state: {},
     last_interaction: now,
     session_start: now,
   };
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
+function getMemoryPools(snapshot: EmotionSnapshot): MemoryPools {
+  const pools = snapshot.memory_pools;
+  if (!pools) {
+    return { attachment_pool: 0, stress_pool: 0 };
+  }
+  return {
+    attachment_pool: clamp01(pools.attachment_pool),
+    stress_pool: clamp01(pools.stress_pool),
+  };
+}
+
+function updateMemoryPools(
+  prev: MemoryPools,
+  emotionDeltas: Partial<Record<EmotionDimension, number>>,
+  elapsedHours: number,
+  trigger: import('../types/actions.js').TriggerType,
+  suppressionAccumulated: number,
+): MemoryPools {
+  const attachmentHalfLife = 72; // hours
+  const stressHalfLife = 48; // hours
+
+  const attachmentDecayed = prev.attachment_pool * Math.exp(-elapsedHours / attachmentHalfLife);
+  const stressDecayed = prev.stress_pool * Math.exp(-elapsedHours / stressHalfLife);
+
+  const relationalBoost = (trigger === 'user_message' || trigger === 'direct_message') ? 0.03 : 0;
+
+  const dTrust = emotionDeltas.trust ?? 0;
+  const dLonging = emotionDeltas.longing ?? 0;
+  const dJoy = emotionDeltas.joy ?? 0;
+  const dAnxiety = emotionDeltas.anxiety ?? 0;
+  const dAnger = emotionDeltas.anger ?? 0;
+  const dSadness = emotionDeltas.sadness ?? 0;
+
+  const attachmentDeltaRaw = dTrust * 0.25 + dLonging * 0.2 + dJoy * 0.1 + relationalBoost;
+  const stressDeltaRaw = dAnxiety * 0.3 + dAnger * 0.25 + dSadness * 0.2 - dJoy * 0.1;
+  const suppressionCarry = Math.min(0.05, suppressionAccumulated * 0.01);
+
+  const attachmentDelta = Math.max(-0.05, Math.min(0.08, attachmentDeltaRaw));
+  const stressDelta = Math.max(-0.08, Math.min(0.1, stressDeltaRaw + suppressionCarry));
+
+  return {
+    attachment_pool: clamp01(attachmentDecayed + attachmentDelta),
+    stress_pool: clamp01(stressDecayed + stressDelta),
+  };
+}
+
+function computeMemoryPressure(pools: MemoryPools): number {
+  // Keep pressure small so it nudges behavior without overriding core impulse signals.
+  const pressure = pools.attachment_pool * 0.08 + pools.stress_pool * 0.22;
+  return Math.min(0.25, Math.max(0, pressure));
+}
+
+function getCustomEmotionDefs(cardData: CardData | null): Record<string, CustomEmotionDef> {
+  const raw = cardData?.behavioral_engine?.custom_emotions;
+  if (!raw) return {};
+  const defs: Record<string, CustomEmotionDef> = {};
+
+  for (const [name, cfg] of Object.entries(raw)) {
+    if (!cfg || !Array.isArray(cfg.range) || cfg.range.length !== 2) continue;
+    if (name.length === 0 || name.length > 64) continue;
+    const min = Number(cfg.range[0]);
+    const max = Number(cfg.range[1]);
+    const baseline = Number(cfg.baseline);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || !Number.isFinite(baseline)) continue;
+    if (min >= max) continue;
+    const projection = parseProjection(cfg.projection);
+    const clampedBaseline = Math.min(max, Math.max(min, baseline));
+    defs[name] = {
+      baseline: clampedBaseline,
+      range: [min, max],
+      projection,
+    };
+  }
+
+  return defs;
+}
+
+function getCustomEmotionState(
+  snapshot: EmotionSnapshot,
+  defs: Record<string, CustomEmotionDef>,
+): Record<string, number> {
+  const state: Record<string, number> = {};
+  const prev = snapshot.custom_state ?? {};
+  for (const [name, def] of Object.entries(defs)) {
+    const value = typeof prev[name] === 'number' ? prev[name] : def.baseline;
+    state[name] = clampRange(value, def.range);
+  }
+  return state;
+}
+
+function sanitizeCustomDeltas(
+  raw: Record<string, number> | undefined,
+  defs: Record<string, CustomEmotionDef>,
+): Record<string, number> {
+  if (!raw) return {};
+  const clean: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!defs[key]) continue;
+    if (!Number.isFinite(value)) continue;
+    clean[key] = Math.min(0.3, Math.max(-0.3, value));
+  }
+  return clean;
+}
+
+function updateCustomEmotionState(
+  prev: Record<string, number>,
+  defs: Record<string, CustomEmotionDef>,
+  deltas: Record<string, number>,
+  elapsedHours: number,
+): Record<string, number> {
+  const next: Record<string, number> = {};
+  const halfLifeHours = 12;
+  const decayRate = Math.max(0, elapsedHours) / halfLifeHours;
+  const decay = Math.exp(-decayRate);
+
+  for (const [name, def] of Object.entries(defs)) {
+    const current = prev[name] ?? def.baseline;
+    const towardBaseline = def.baseline + (current - def.baseline) * decay;
+    const span = Math.max(0.0001, def.range[1] - def.range[0]);
+    const appliedDelta = (deltas[name] ?? 0) * span * 0.35;
+    next[name] = clampRange(towardBaseline + appliedDelta, def.range);
+  }
+
+  return next;
+}
+
+function projectCustomToCoreDeltas(
+  before: Record<string, number>,
+  after: Record<string, number>,
+  defs: Record<string, CustomEmotionDef>,
+): Partial<Record<EmotionDimension, number>> {
+  const projected: Partial<Record<EmotionDimension, number>> = {};
+
+  for (const [name, def] of Object.entries(defs)) {
+    const span = Math.max(0.0001, def.range[1] - def.range[0]);
+    const normalizedShift = ((after[name] ?? def.baseline) - (before[name] ?? def.baseline)) / span;
+    if (Math.abs(normalizedShift) < 0.0001) continue;
+    const profile = def.projection ?? inferProjectionProfile(name);
+    for (const [dim, weight] of Object.entries(profile) as Array<[EmotionDimension, number]>) {
+      projected[dim] = (projected[dim] ?? 0) + normalizedShift * weight;
+    }
+  }
+
+  for (const dim of Object.keys(projected) as EmotionDimension[]) {
+    projected[dim] = Math.min(0.15, Math.max(-0.15, projected[dim] ?? 0));
+  }
+  return projected;
+}
+
+function inferProjectionProfile(name: string): Record<EmotionDimension, number> {
+  const n = name.toLowerCase();
+
+  if (/(anger|rage|hate|resent|furious)/.test(n)) {
+    return { anger: 0.6, anxiety: 0.2, joy: -0.2, sadness: 0.1, longing: 0, trust: -0.1 };
+  }
+  if (/(fear|anx|panic|worry)/.test(n)) {
+    return { anxiety: 0.65, sadness: 0.15, joy: -0.2, anger: 0.05, longing: 0, trust: -0.05 };
+  }
+  if (/(sad|grief|lonely|loss|depress)/.test(n)) {
+    return { sadness: 0.6, anxiety: 0.15, joy: -0.2, longing: 0.1, trust: -0.05, anger: 0 };
+  }
+  if (/(love|crush|attach|miss|yearn|long)/.test(n)) {
+    return { longing: 0.45, trust: 0.3, joy: 0.2, sadness: -0.05, anxiety: -0.05, anger: 0 };
+  }
+  if (/(joy|happy|excite|kitty|cute|comfort|safe)/.test(n)) {
+    return { joy: 0.55, trust: 0.25, anxiety: -0.1, sadness: -0.05, longing: 0.05, anger: 0 };
+  }
+
+  return { joy: 0.25, trust: 0.15, sadness: -0.1, anxiety: -0.1, longing: 0.05, anger: 0 };
+}
+
+function parseProjection(
+  projection: Partial<Record<EmotionDimension, number>> | undefined,
+): Partial<Record<EmotionDimension, number>> | undefined {
+  if (!projection) return undefined;
+
+  const dims: EmotionDimension[] = ['joy', 'sadness', 'anger', 'anxiety', 'longing', 'trust'];
+  const parsed: Partial<Record<EmotionDimension, number>> = {};
+  let absSum = 0;
+
+  for (const dim of dims) {
+    const raw = projection[dim];
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue;
+    const clamped = Math.min(1, Math.max(-1, raw));
+    if (Math.abs(clamped) < 0.001) continue;
+    parsed[dim] = clamped;
+    absSum += Math.abs(clamped);
+  }
+
+  if (absSum <= 0.001) return undefined;
+  if (absSum <= 1) return parsed;
+
+  const normalized: Partial<Record<EmotionDimension, number>> = {};
+  for (const [dim, value] of Object.entries(parsed) as Array<[EmotionDimension, number]>) {
+    normalized[dim] = value / absSum;
+  }
+  return normalized;
+}
+
+function mergeEmotionDeltas(
+  base: Partial<Record<EmotionDimension, number>>,
+  projection: Partial<Record<EmotionDimension, number>>,
+): Partial<Record<EmotionDimension, number>> {
+  const merged: Partial<Record<EmotionDimension, number>> = {};
+  const dims: EmotionDimension[] = ['joy', 'sadness', 'anger', 'anxiety', 'longing', 'trust'];
+  for (const dim of dims) {
+    const value = (base[dim] ?? 0) + (projection[dim] ?? 0);
+    if (Math.abs(value) < 0.0001) continue;
+    merged[dim] = Math.min(0.3, Math.max(-0.3, value));
+  }
+  return merged;
+}
+
+function clampRange(value: number, range: [number, number]): number {
+  return Math.min(range[1], Math.max(range[0], value));
 }
 
 function updateSuppression(

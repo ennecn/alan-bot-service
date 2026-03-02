@@ -11,6 +11,7 @@ function makeImpulse(value: number, threshold = 0.6): ImpulseResult {
       base_impulse: value,
       emotion_urgency: 0,
       suppression_pressure: 0,
+      memory_pressure: 0,
       time_pressure: 0,
       event_importance: 0,
       user_message_increment: 0,

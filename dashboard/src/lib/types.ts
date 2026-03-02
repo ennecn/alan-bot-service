@@ -58,6 +58,11 @@ export interface EmotionState {
 export interface EmotionSnapshot {
   current: EmotionState;
   baseline: EmotionState;
+  memory_pools?: {
+    attachment_pool: number;
+    stress_pool: number;
+  };
+  custom_state?: Record<string, number>;
   suppression: {
     count: number;
     consecutive_hesitate: number;
@@ -90,6 +95,13 @@ export interface DebugState {
   card: {
     character_name: string;
     detected_language: string;
+    behavioral_engine?: {
+      custom_emotions?: Record<string, {
+        range: [number, number];
+        baseline: number;
+        projection?: Partial<EmotionState>;
+      }>;
+    };
   } | null;
   preset: {
     source_name: string;

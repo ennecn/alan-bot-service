@@ -15,7 +15,11 @@ export type EmotionState = Record<EmotionDimension, number>;
 export interface EmotionConfig {
   baseline: Partial<EmotionState>;
   half_life: Partial<Record<EmotionDimension, number>>; // hours, default 2.0
-  custom_emotions?: Record<string, { range: [number, number]; baseline: number }>;
+  custom_emotions?: Record<string, {
+    range: [number, number];
+    baseline: number;
+    projection?: Partial<Record<EmotionDimension, number>>;
+  }>;
 }
 
 export interface SuppressionFatigue {
@@ -25,10 +29,17 @@ export interface SuppressionFatigue {
   last_suppress: string | null; // ISO timestamp
 }
 
+export interface MemoryPools {
+  attachment_pool: number;
+  stress_pool: number;
+}
+
 export interface EmotionSnapshot {
   current: EmotionState;
   baseline: EmotionState;
   suppression: SuppressionFatigue;
+  memory_pools?: MemoryPools;
+  custom_state?: Record<string, number>;
   last_interaction: string; // ISO timestamp
   session_start: string;    // ISO timestamp
   directive_history?: string[]; // last 3 writeDirective pattern IDs (PRD §2.1.5)
@@ -43,6 +54,7 @@ export interface ImpulseComponents {
   base_impulse: number;
   emotion_urgency: number;
   suppression_pressure: number;
+  memory_pressure: number;
   time_pressure: number;
   event_importance: number;
   user_message_increment: number;
@@ -67,6 +79,7 @@ export interface System1Output {
     importance: EventImportance;
   };
   emotional_interpretation: Partial<Record<EmotionDimension, number>>; // each clamped ±0.3
+  custom_deltas?: Record<string, number>; // each clamped ±0.3, filtered by configured custom_emotions
   cognitive_projection: string;
   wi_expansion: string[]; // WI entry IDs to additionally activate
   impulse_narrative: string; // IMPULSE.md content

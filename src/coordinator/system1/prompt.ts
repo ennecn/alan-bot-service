@@ -32,6 +32,7 @@ export function buildSystem1Prompt(params: System1PromptParams): System1PromptRe
     '- Classify the event type and importance from the character\'s perspective.',
     '- Interpret emotional impact as deltas (each between -0.3 and +0.3) on the 6 dimensions: joy, sadness, anger, anxiety, longing, trust.',
     '- Only include dimensions that are actually affected. Omit unchanged dimensions.',
+    '- If custom emotions are provided, you may output custom_deltas (each between -0.3 and +0.3) for those names only.',
     '- Write cognitive_projection as the character\'s inner monologue — what they would think.',
     '- List any additional World Info entry IDs (from the candidates) that should be activated.',
     `- Write impulse_narrative in ${langLabel} — this is the character's current impulse state.`,
@@ -57,6 +58,13 @@ export function buildSystem1Prompt(params: System1PromptParams): System1PromptRe
     .map(([dim, val]) => `  ${dim}: ${(val as number).toFixed(3)}`)
     .join('\n');
   parts.push(`## Current Emotion State\n${emotionLines}`);
+
+  if (params.customEmotions && params.customEmotions.length > 0) {
+    const customLines = params.customEmotions
+      .map((c) => `  ${c.name}: current=${c.current.toFixed(3)}, baseline=${c.baseline.toFixed(3)}, range=[${c.range[0].toFixed(3)}, ${c.range[1].toFixed(3)}]`)
+      .join('\n');
+    parts.push(`## Custom Emotions\n${customLines}`);
+  }
 
   // b. Event content with nonce separators
   parts.push(

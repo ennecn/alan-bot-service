@@ -20,6 +20,8 @@ export function StatePanel({ state }: { state: DebugState | null }) {
   const fired = firedMatch?.[1] === 'true';
   const decisionMatch = state.impulse?.match(/decision:\s*(\w+)/);
   const decision = decisionMatch?.[1];
+  const customState = Object.entries(state.emotion?.custom_state ?? {}).sort((a, b) => b[1] - a[1]);
+  const customDefs = state.card?.behavioral_engine?.custom_emotions ?? {};
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-5">
@@ -42,6 +44,33 @@ export function StatePanel({ state }: { state: DebugState | null }) {
           <div className="text-xs text-[var(--text-muted)] mt-1">
             Last: {timeAgo(state.emotion.last_interaction)}
           </div>
+          {customState.length > 0 && (
+            <div className="mt-2 space-y-1">
+              <div className="text-[11px] font-semibold text-[var(--text-muted)] uppercase tracking-wider">
+                Custom
+              </div>
+              {customState.map(([name, value]) => {
+                const def = customDefs[name];
+                const range = def?.range ?? [0, 1];
+                const span = Math.max(0.001, range[1] - range[0]);
+                const percent = Math.max(0, Math.min(100, ((value - range[0]) / span) * 100));
+                return (
+                  <div key={name} className="text-xs">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <span className="font-mono text-[var(--text-muted)]">{name}</span>
+                      <span className="font-mono">{value.toFixed(2)}</span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-[var(--bg)] overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-cyan-500 transition-all duration-500"
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
       )}
 

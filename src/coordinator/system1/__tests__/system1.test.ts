@@ -87,6 +87,17 @@ describe('buildSystem1Prompt', () => {
     expect(result.system).toContain('Chinese (Mandarin)');
   });
 
+  it('includes custom emotion section when provided', () => {
+    const result = buildSystem1Prompt({
+      ...baseParams,
+      customEmotions: [
+        { name: 'hello_kitty', current: 0.7, baseline: 0.4, range: [0, 1] },
+      ],
+    });
+    expect(result.messages[0].content).toContain('## Custom Emotions');
+    expect(result.messages[0].content).toContain('hello_kitty');
+  });
+
   it('includes previous impulse when provided', () => {
     const params = { ...baseParams, previousImpulse: 'I feel a strong urge to reply.' };
     const result = buildSystem1Prompt(params);
@@ -183,5 +194,26 @@ describe('sanitizeOutput', () => {
     const result = sanitizeOutput(raw);
     expect(result.emotional_interpretation.joy).toBe(0.1);
     expect('fake_emotion' in result.emotional_interpretation).toBe(false);
+  });
+
+  it('sanitizes custom_deltas to valid number range and key length', () => {
+    const raw = {
+      event_classification: { type: 'system', importance: 0.0 },
+      emotional_interpretation: {},
+      custom_deltas: {
+        hello_kitty: 0.7,
+        homesick: -0.9,
+        '': 0.1,
+      },
+      cognitive_projection: '',
+      wi_expansion: [],
+      impulse_narrative: '',
+      memory_consolidation: { should_save: false, summary: '' },
+    };
+    const result = sanitizeOutput(raw);
+    expect(result.custom_deltas).toEqual({
+      hello_kitty: 0.3,
+      homesick: -0.3,
+    });
   });
 });
